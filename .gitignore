@@ -1,0 +1,239 @@
+# ==================================================
+# VS Code Extension .gitignore
+# ==================================================
+
+# Build outputs and packages
+out/
+dist/
+*.vsix
+*.tgz
+
+# Node.js dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Package lock files (keep only one)
+# yarn.lock
+# pnpm-lock.yaml
+
+# Environment and configuration files
+.env
+.env.*
+.env.local
+.env.production
+.env.development
+.env.test
+
+# ==================================================
+# IDE and Editor Files
+# ==================================================
+
+# VS Code specific
+.vscode/
+.vscode-test/
+*.code-workspace
+
+# Cursor IDE specific
+.cursor/
+!.cursor/*.example
+.windsurfrules
+.roomodes
+.cursorrules
+
+# Other IDEs
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.swp
+*.swo
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# ==================================================
+# Development Tools & Frameworks
+# ==================================================
+
+# Task Master AI artifacts (development only)
+.taskmaster/
+.taskmasterconfig
+scripts/prd.txt
+scripts/task-complexity-report.json
+tasks.json
+tasks/
+
+# Roo AI Framework
+.roo/
+
+# Testing and Coverage
+coverage/
+.nyc_output/
+.coverage/
+*.lcov
+test-results/
+junit.xml
+
+# Development and example files
+example/
+examples/
+test-data/
+dev-install.js
+scripts/build.js
+scripts/dev-install.js
+test-*.md
+dev-*.md
+
+# ==================================================
+# Logs and Temporary Files
+# ==================================================
+
+# Logs
+logs/
+*.log
+dev-debug.log
+debug.log
+error.log
+access.log
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.orig
+*.cache
+.temp/
+tmp/
+
+# ==================================================
+# OS Specific Files
+# ==================================================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# ==================================================
+# Security and Sensitive Files
+# ==================================================
+
+# API keys and secrets
+*.key
+*.pem
+*.p12
+*.pfx
+secrets.json
+config/secrets.*
+.secrets/
+
+# SSL certificates
+*.crt
+*.cer
+*.der
+
+# ==================================================
+# Project Specific Exclusions
+# ==================================================
+
+# Release artifacts (keep CHANGELOG.md for users)
+RELEASE_NOTES.md
+RELEASE_CHECKLIST.md
+
+# Documentation drafts
+*-draft.md
+*-wip.md
+
+# Personal notes and todos
+TODO.md
+NOTES.md
+notes.txt
+.notes/
+
+# Backup files
+*.backup
+backup/
+backups/
+
+# ==================================================
+# Final Exclusions
+# ==================================================
+
+# Any local configuration overrides
+local.*
+*.local
+
+# Editor swap files
+.*.swp
+.*.swo
+
+# macOS Finder files
+.DS_Store?
+
+# Windows image file caches
+Thumbs.db
+
+# Folder config file
+Desktop.ini
+
+# ==================================================
+# Keep These Files (Negated Patterns)
+# ==================================================
+
+# Keep essential config files
+!.eslintrc.*
+!.prettierrc.*
+!.editorconfig
+!.gitignore
+!.vscodeignore
+
+# Keep package files
+!package.json
+!package-lock.json
+
+# Keep TypeScript config
+!tsconfig.json
+!tsconfig.*.json 

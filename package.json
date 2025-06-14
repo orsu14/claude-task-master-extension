@@ -1,0 +1,413 @@
+{
+  "name": "claude-task-master-extension",
+  "displayName": "Claude Task Master Visual Interface",
+  "description": "Visual VS Code/Cursor interface for task-master-ai projects - provides tree view, progress tracking, and task management UI",
+  "version": "1.0.0",
+  "publisher": "DevDreed",
+  "license": "MIT",
+  "icon": "images/claude-task-master-extension.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DevDreed/claude-task-master-extension.git"
+  },
+  "engines": {
+    "vscode": "^1.70.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "keywords": [
+    "task-management",
+    "claude",
+    "tree-view",
+    "tasks",
+    "productivity",
+    "project-management",
+    "ai",
+    "mcp",
+    "task-master-ai",
+    "workflow",
+    "organization"
+  ],
+  "homepage": "https://github.com/DevDreed/claude-task-master-extension#readme",
+  "bugs": "https://github.com/DevDreed/claude-task-master-extension/issues",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claudeTaskMaster",
+          "title": "Claude Task Master",
+          "icon": "images/claude-task-master-extension.png"
+        }
+      ]
+    },
+    "views": {
+      "claudeTaskMaster": [
+        {
+          "id": "claudeTaskMasterMainView",
+          "name": "Tasks",
+          "when": "claudeTaskMaster.hasTaskmaster"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "claudeTaskMaster.refresh",
+        "title": "Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "claudeTaskMaster.search",
+        "title": "Search Tasks",
+        "icon": "$(search)"
+      },
+      {
+        "command": "claudeTaskMaster.filterByStatus",
+        "title": "Filter by Status",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "claudeTaskMaster.addTask",
+        "title": "Add Task",
+        "icon": "$(add)"
+      },
+      {
+        "command": "claudeTaskMaster.showTask",
+        "title": "Show Task Details",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "claudeTaskMaster.setTaskStatus",
+        "title": "Set Task Status",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "claudeTaskMaster.expandTask",
+        "title": "Expand Task",
+        "icon": "$(unfold)"
+      },
+      {
+        "command": "claudeTaskMaster.nextTask",
+        "title": "Show Next Task",
+        "icon": "$(arrow-right)"
+      },
+      {
+        "command": "claudeTaskMaster.openPRD",
+        "title": "Open PRD",
+        "icon": "$(file-text)"
+      },
+      {
+        "command": "claudeTaskMaster.startWorking",
+        "title": "Start Working",
+        "icon": "$(play)"
+      },
+      {
+        "command": "claudeTaskMaster.addSubtask",
+        "title": "Add Subtask",
+        "icon": "$(plus)"
+      },
+      {
+        "command": "claudeTaskMaster.editTask",
+        "title": "Edit Task",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "claudeTaskMaster.editTaskTitle",
+        "title": "Edit Title",
+        "icon": "$(pencil)"
+      },
+      {
+        "command": "claudeTaskMaster.deleteTask",
+        "title": "Delete Task",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "claudeTaskMaster.changePriority",
+        "title": "Change Priority",
+        "icon": "$(star)"
+      },
+      {
+        "command": "claudeTaskMaster.setDependencies",
+        "title": "Set Dependencies",
+        "icon": "$(link)"
+      },
+      {
+        "command": "claudeTaskMaster.copyTaskDetails",
+        "title": "Copy Task Details",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "claudeTaskMaster.markCompleted",
+        "title": "Mark Completed",
+        "icon": "$(check)"
+      },
+      {
+        "command": "claudeTaskMaster.markInProgress",
+        "title": "Mark In Progress",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "claudeTaskMaster.markTodo",
+        "title": "Mark Todo",
+        "icon": "$(circle-outline)"
+      },
+      {
+        "command": "claudeTaskMaster.markBlocked",
+        "title": "Mark Blocked",
+        "icon": "$(x)"
+      },
+      {
+        "command": "claudeTaskMaster.expandAll",
+        "title": "Expand All",
+        "icon": "$(expand-all)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "claudeTaskMaster.refresh",
+          "when": "view == claudeTaskMasterMainView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudeTaskMaster.search",
+          "when": "view == claudeTaskMasterMainView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claudeTaskMaster.filterByStatus",
+          "when": "view == claudeTaskMasterMainView",
+          "group": "navigation@3"
+        },
+        {
+          "command": "claudeTaskMaster.addTask",
+          "when": "view == claudeTaskMasterMainView",
+          "group": "navigation@4"
+        },
+        {
+          "command": "claudeTaskMaster.nextTask",
+          "when": "view == claudeTaskMasterMainView",
+          "group": "navigation@5"
+        },
+        {
+          "command": "claudeTaskMaster.expandAll",
+          "when": "view == claudeTaskMasterMainView",
+          "group": "navigation@6"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "claudeTaskMaster.showTask",
+          "when": "view == claudeTaskMasterMainView && viewItem == task",
+          "group": "inline@1"
+        },
+        {
+          "command": "claudeTaskMaster.startWorking",
+          "when": "view == claudeTaskMasterMainView && viewItem == task",
+          "group": "inline@2"
+        },
+        {
+          "command": "claudeTaskMaster.markCompleted",
+          "when": "view == claudeTaskMasterMainView && viewItem == task",
+          "group": "1_status@1"
+        },
+        {
+          "command": "claudeTaskMaster.markInProgress",
+          "when": "view == claudeTaskMasterMainView && viewItem == task",
+          "group": "1_status@2"
+        },
+        {
+          "command": "claudeTaskMaster.markTodo",
+          "when": "view == claudeTaskMasterMainView && viewItem == task",
+          "group": "1_status@3"
+        },
+        {
+          "command": "claudeTaskMaster.markBlocked",
+          "when": "view == claudeTaskMasterMainView && viewItem == task",
+          "group": "1_status@4"
+        },
+        {
+          "command": "claudeTaskMaster.setTaskStatus",
+          "when": "view == claudeTaskMasterMainView && viewItem == task",
+          "group": "1_status@5"
+        },
+        {
+          "command": "claudeTaskMaster.addSubtask",
+          "when": "view == claudeTaskMasterMainView && viewItem == task",
+          "group": "2_actions@1"
+        },
+        {
+          "command": "claudeTaskMaster.expandTask",
+          "when": "view == claudeTaskMasterMainView && viewItem == task",
+          "group": "2_actions@2"
+        },
+        {
+          "command": "claudeTaskMaster.editTask",
+          "when": "view == claudeTaskMasterMainView && viewItem == task",
+          "group": "3_edit@1"
+        },
+        {
+          "command": "claudeTaskMaster.editTaskTitle",
+          "when": "view == claudeTaskMasterMainView && viewItem == task",
+          "group": "3_edit@2"
+        },
+        {
+          "command": "claudeTaskMaster.changePriority",
+          "when": "view == claudeTaskMasterMainView && viewItem == task",
+          "group": "4_properties@1"
+        },
+        {
+          "command": "claudeTaskMaster.setDependencies",
+          "when": "view == claudeTaskMasterMainView && viewItem == task",
+          "group": "4_properties@2"
+        },
+        {
+          "command": "claudeTaskMaster.copyTaskDetails",
+          "when": "view == claudeTaskMasterMainView && viewItem == task",
+          "group": "5_utility@1"
+        },
+        {
+          "command": "claudeTaskMaster.deleteTask",
+          "when": "view == claudeTaskMasterMainView && viewItem == task",
+          "group": "6_delete@1"
+        },
+        {
+          "command": "claudeTaskMaster.showTask",
+          "when": "view == claudeTaskMasterMainView && viewItem == subtask",
+          "group": "inline@1"
+        },
+        {
+          "command": "claudeTaskMaster.markCompleted",
+          "when": "view == claudeTaskMasterMainView && viewItem == subtask",
+          "group": "1_status@1"
+        },
+        {
+          "command": "claudeTaskMaster.markInProgress",
+          "when": "view == claudeTaskMasterMainView && viewItem == subtask",
+          "group": "1_status@2"
+        },
+        {
+          "command": "claudeTaskMaster.markTodo",
+          "when": "view == claudeTaskMasterMainView && viewItem == subtask",
+          "group": "1_status@3"
+        },
+        {
+          "command": "claudeTaskMaster.markBlocked",
+          "when": "view == claudeTaskMasterMainView && viewItem == subtask",
+          "group": "1_status@4"
+        },
+        {
+          "command": "claudeTaskMaster.editTask",
+          "when": "view == claudeTaskMasterMainView && viewItem == subtask",
+          "group": "2_edit@1"
+        },
+        {
+          "command": "claudeTaskMaster.copyTaskDetails",
+          "when": "view == claudeTaskMasterMainView && viewItem == subtask",
+          "group": "3_utility@1"
+        },
+        {
+          "command": "claudeTaskMaster.deleteTask",
+          "when": "view == claudeTaskMasterMainView && viewItem == subtask",
+          "group": "4_delete@1"
+        },
+        {
+          "command": "claudeTaskMaster.addTask",
+          "when": "view == claudeTaskMasterMainView && viewItem == category",
+          "group": "1_actions@1"
+        },
+        {
+          "command": "claudeTaskMaster.startWorking",
+          "when": "view == claudeTaskMasterMainView && viewItem == next-task",
+          "group": "inline@1"
+        },
+        {
+          "command": "claudeTaskMaster.showTask",
+          "when": "view == claudeTaskMasterMainView && viewItem == next-task",
+          "group": "1_actions@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Claude Task Master",
+      "properties": {
+        "claudeTaskMaster.autoRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically refresh tasks when files change"
+        },
+        "claudeTaskMaster.taskmasterPath": {
+          "type": "string",
+          "default": ".taskmaster",
+          "description": "Path to the taskmaster directory (relative to workspace root)"
+        },
+        "claudeTaskMaster.developmentMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable development mode with detailed logging"
+        },
+        "claudeTaskMaster.enableLogging": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable console and output channel logging for debugging"
+        },
+        "claudeTaskMaster.enableFileLogging": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable file logging to logs/extension.log (creates files in your project)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js",
+    "test:coverage": "nyc --reporter=text --reporter=html npm test",
+    "build": "node scripts/build.js",
+    "package": "vsce package",
+    "dev-install": "node scripts/dev-install.js",
+    "dev": "npm run dev-install"
+  },
+  "nyc": {
+    "include": [
+      "out/*.js"
+    ],
+    "exclude": [
+      "out/test/**",
+      "**/*.d.ts"
+    ],
+    "reporter": [
+      "text",
+      "html"
+    ],
+    "all": true
+  },
+  "devDependencies": {
+    "@types/glob": "^7.2.0",
+    "@types/mocha": "^9.1.1",
+    "@types/node": "16.x",
+    "@types/sinon": "^17.0.4",
+    "@types/vscode": "^1.70.0",
+    "@typescript-eslint/eslint-plugin": "^5.31.0",
+    "@typescript-eslint/parser": "^5.31.0",
+    "@vscode/test-electron": "^2.1.5",
+    "eslint": "^8.20.0",
+    "glob": "^8.0.3",
+    "mocha": "^10.0.0",
+    "nyc": "^17.1.0",
+    "sinon": "^20.0.0",
+    "typescript": "^4.7.4"
+  },
+  "dependencies": {
+    "chokidar": "^3.5.3"
+  }
+}
