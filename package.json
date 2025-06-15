@@ -2,7 +2,7 @@
   "name": "claude-task-master-extension",
   "displayName": "Claude Task Master Visual Interface",
   "description": "Visual VS Code/Cursor interface for task-master-ai projects - provides tree view, progress tracking, and task management UI",
-  "version": "1.1.0",
+  "version": "1.2.1",
   "publisher": "DevDreed",
   "license": "MIT",
   "icon": "images/claude-task-master-extension.png",
