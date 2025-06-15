@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { TaskProvider } from './taskProvider';
 import { TaskMasterClient } from './taskMasterClient';
+import { TagStatusBarItem } from './statusBar';
 import * as path from 'path';
 import * as fs from 'fs';
 import { initializeLogger, disposeLogger, log } from './logger';
@@ -17,9 +18,16 @@ import {
     SubtaskStats, 
     ExpandItemResult 
 } from './types';
+import { 
+    getTagContext, 
+    getTagAwarePlaceholder, 
+    logTagOperation, 
+    formatTagSuccessMessage 
+} from './tagUtils';
 
 let taskProvider: TaskProvider;
 let taskMasterClient: TaskMasterClient;
+let tagStatusBar: TagStatusBarItem;
 
 // Enhanced logging utilities
 function logUserInteraction(action: string, details?: UserInteractionDetails | null, context?: string) {
@@ -85,6 +93,10 @@ export function activate(context: vscode.ExtensionContext) {
     taskMasterClient = new TaskMasterClient(taskmasterPath);
     taskProvider = new TaskProvider(taskMasterClient);
     log('TaskMasterClient and TaskProvider initialized.');
+
+    // Initialize status bar for tag management
+    tagStatusBar = new TagStatusBarItem(context, taskMasterClient);
+    log('TagStatusBarItem initialized.');
 
     // Register tree data provider
     const treeView = vscode.window.createTreeView('claudeTaskMasterMainView', {
@@ -194,6 +206,51 @@ export function activate(context: vscode.ExtensionContext) {
             await addNewTask(categoryItem);
         }),
 
+        // Tag management commands
+        vscode.commands.registerCommand('claudeTaskMaster.switchTag', async () => {
+            const cmdInfo = logCommandStart('claudeTaskMaster.switchTag');
+            logUserInteraction('Switch tag initiated', null, 'tag-management');
+            try {
+                await switchTagHandler();
+                logCommandEnd(cmdInfo, true, undefined, { success: true, action: 'tag-switch-dialog-opened' });
+            } catch (error) {
+                logCommandEnd(cmdInfo, false, error instanceof Error ? error : new Error(String(error)));
+            }
+        }),
+
+        vscode.commands.registerCommand('claudeTaskMaster.createTag', async () => {
+            const cmdInfo = logCommandStart('claudeTaskMaster.createTag');
+            logUserInteraction('Create tag initiated', null, 'tag-management');
+            try {
+                await createTagHandler();
+                logCommandEnd(cmdInfo, true, undefined, { success: true, action: 'tag-create-dialog-opened' });
+            } catch (error) {
+                logCommandEnd(cmdInfo, false, error instanceof Error ? error : new Error(String(error)));
+            }
+        }),
+
+        vscode.commands.registerCommand('claudeTaskMaster.deleteTag', async () => {
+            const cmdInfo = logCommandStart('claudeTaskMaster.deleteTag');
+            logUserInteraction('Delete tag initiated', null, 'tag-management');
+            try {
+                await deleteTagHandler();
+                logCommandEnd(cmdInfo, true, undefined, { success: true, action: 'tag-delete-dialog-opened' });
+            } catch (error) {
+                logCommandEnd(cmdInfo, false, error instanceof Error ? error : new Error(String(error)));
+            }
+        }),
+
+        vscode.commands.registerCommand('claudeTaskMaster.listTags', async () => {
+            const cmdInfo = logCommandStart('claudeTaskMaster.listTags');
+            logUserInteraction('List tags initiated', null, 'tag-management');
+            try {
+                await listTagsHandler();
+                logCommandEnd(cmdInfo, true, undefined, { success: true, action: 'tag-list-displayed' });
+            } catch (error) {
+                logCommandEnd(cmdInfo, false, error instanceof Error ? error : new Error(String(error)));
+            }
+        }),
+
         vscode.commands.registerCommand('claudeTaskMaster.addSubtask', async (taskItem) => {
             if (taskItem && taskItem.task) {
                 log(`Executing command: claudeTaskMaster.addSubtask for parent task ID ${taskItem.task.id}`);
@@ -234,7 +291,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('claudeTaskMaster.markCompleted', async (taskItem) => {
             if (taskItem && taskItem.task) {
                 log(`Executing command: claudeTaskMaster.markCompleted for task ID ${taskItem.task.id}`);
-                await setTaskStatus(taskItem.task, 'completed');
+                await setTaskStatusWithContext(taskItem.task, 'completed', taskItem.parentTaskId);
             } else {
                 log('claudeTaskMaster.markCompleted command called without a valid task item.');
             }
@@ -243,7 +300,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('claudeTaskMaster.markInProgress', async (taskItem) => {
             if (taskItem && taskItem.task) {
                 log(`Executing command: claudeTaskMaster.markInProgress for task ID ${taskItem.task.id}`);
-                await setTaskStatus(taskItem.task, 'in-progress');
+                await setTaskStatusWithContext(taskItem.task, 'in-progress', taskItem.parentTaskId);
             } else {
                 log('claudeTaskMaster.markInProgress command called without a valid task item.');
             }
@@ -252,7 +309,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('claudeTaskMaster.markTodo', async (taskItem) => {
             if (taskItem && taskItem.task) {
                 log(`Executing command: claudeTaskMaster.markTodo for task ID ${taskItem.task.id}`);
-                await setTaskStatus(taskItem.task, 'todo');
+                await setTaskStatusWithContext(taskItem.task, 'todo', taskItem.parentTaskId);
             } else {
                 log('claudeTaskMaster.markTodo command called without a valid task item.');
             }
@@ -261,7 +318,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('claudeTaskMaster.markBlocked', async (taskItem) => {
             if (taskItem && taskItem.task) {
                 log(`Executing command: claudeTaskMaster.markBlocked for task ID ${taskItem.task.id}`);
-                await setTaskStatus(taskItem.task, 'blocked');
+                await setTaskStatusWithContext(taskItem.task, 'blocked', taskItem.parentTaskId);
             } else {
                 log('claudeTaskMaster.markBlocked command called without a valid task item.');
             }
@@ -442,11 +499,16 @@ async function showTaskDetails(task: Task, context: vscode.ExtensionContext, par
                 switch (message.command) {
                     case 'updateSubtaskStatus':
                         try {
-                            log(`Updating subtask status for task ${task.id} and subtask ID ${message.subtaskId}`);
-                            await taskMasterClient.setTaskStatus(message.subtaskId, message.status);
+                            log(`Updating subtask status for subtask ID ${message.subtaskId} in parent task ${task.id}`);
+                            
+                            // Determine the parent task ID for the subtask update
+                            const actualParentTaskId = parentTaskId || task.id.toString();
+                            
+                            // Use the new setSubtaskStatus method that requires both parent and subtask IDs
+                            await taskMasterClient.setSubtaskStatus(actualParentTaskId, message.subtaskId, message.status);
                             taskProvider.refresh();
                             vscode.window.showInformationMessage(
-                                `Subtask ${message.subtaskId} marked as ${message.status}`
+                                `Subtask ${message.subtaskId} in Task ${actualParentTaskId} marked as ${message.status}`
                             );
                             // Refresh the webview with updated data
                             log(`Refreshing webview for task ${task.id} after subtask update.`);
@@ -494,7 +556,7 @@ async function showTaskDetails(task: Task, context: vscode.ExtensionContext, par
                         break;
 
                     case 'startWorking':
-                        await setTaskStatus(task, 'in-progress');
+                        await setTaskStatusWithContext(task, 'in-progress', parentTaskId);
                         // Refresh the webview with updated data
                         const workingTaskDetails = await getTaskDetailsImproved(task.id, parentTaskId);
                         if (workingTaskDetails) {
@@ -540,6 +602,9 @@ async function expandTask(task: Task) {
 
 async function showNextTask(context: vscode.ExtensionContext) {
     try {
+        const tagContext = getTagContext(taskMasterClient);
+        logTagOperation('Show Next Task', tagContext);
+        
         const nextTask = await taskMasterClient.getNextTask();
         if (nextTask) {
             // Determine if this is a subtask and extract parent ID if needed
@@ -547,7 +612,8 @@ async function showNextTask(context: vscode.ExtensionContext) {
             log(`showNextTask: nextTask.id="${nextTask.id}", extracted parentTaskId="${parentTaskId || 'none'}"`);
             await showTaskDetails(nextTask, context, parentTaskId);
         } else {
-            vscode.window.showInformationMessage('No next task available');
+            const message = formatTagSuccessMessage('No next task available', tagContext);
+            vscode.window.showInformationMessage(message);
         }
     } catch (error) {
         vscode.window.showErrorMessage(`Failed to get next task: ${error}`);
@@ -581,20 +647,31 @@ async function openPRD() {
 
 async function startWorkingOnTask(task: Task, context: vscode.ExtensionContext, parentTaskId?: string) {
     try {
+        const tagContext = getTagContext(taskMasterClient);
+        logTagOperation('Start Working on Task', tagContext, { taskId: task.id, taskTitle: task.title });
+        
         // Show task details first using improved lookup
         await showTaskDetails(task, context, parentTaskId);
         
-        // Set task status to in-progress
+        // Set task status to in-progress with tag-aware confirmation
+        const confirmMessage = tagContext.isTaggedFormat
+            ? `[Tag: ${tagContext.currentTag}] Start working on "${task.title}"? This will set the task status to "in-progress".`
+            : `Start working on "${task.title}"? This will set the task status to "in-progress".`;
+            
         const confirmed = await vscode.window.showInformationMessage(
-            `Start working on "${task.title}"? This will set the task status to "in-progress".`,
+            confirmMessage,
             'Start Working',
             'Cancel'
         );
         
         if (confirmed === 'Start Working') {
-            await taskMasterClient.setTaskStatus(task.id, 'in-progress');
-            taskProvider.refresh();
-            vscode.window.showInformationMessage(`🎯 Started working on Task ${task.id}: ${task.title}`);
+            await setTaskStatusWithContext(task, 'in-progress', parentTaskId);
+            
+            const successMessage = formatTagSuccessMessage(
+                `🎯 Started working on Task ${task.id}: ${task.title}`,
+                tagContext
+            );
+            vscode.window.showInformationMessage(successMessage);
         }
     } catch (error) {
         vscode.window.showErrorMessage(`Failed to start working on task: ${error}`);
@@ -605,12 +682,16 @@ function generateTaskDetailsHtml(task: Task, parentTaskId?: string): string {
     // Determine if it's a subtask based on parentTaskId presence
     const isSubtask = !!parentTaskId;
     
+    // Get tag context for display
+    const tagContext = taskMasterClient.getTagContext();
+    
     // Parse parent and subtask information for better display
     let taskDisplayInfo = {
         taskId: task.id,
         taskType: isSubtask ? 'Subtask' : 'Main Task',
         parentInfo: isSubtask ? `Part of Task ${parentTaskId}` : '',
-        fullHierarchy: isSubtask ? `Task ${parentTaskId} → Subtask ${task.id}` : `Task ${task.id}`
+        fullHierarchy: isSubtask ? `Task ${parentTaskId} → Subtask ${task.id}` : `Task ${task.id}`,
+        tagInfo: tagContext.isTaggedFormat ? `Tag: ${tagContext.currentTag}` : ''
         };
     
     // Calculate subtask progress (only for main tasks)
@@ -764,6 +845,23 @@ function generateTaskDetailsHtml(task: Task, parentTaskId?: string): string {
             text-transform: uppercase;
             letter-spacing: 1px;
             opacity: 0.8;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .tag-indicator {
+            background: linear-gradient(135deg, var(--tm-accent), var(--tm-accent-hover));
+            color: #ffffff;
+            padding: 4px 8px;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: none;
+            letter-spacing: 0;
+            box-shadow: var(--tm-shadow-sm);
+            opacity: 1;
         }
 
         .task-title {
@@ -1408,7 +1506,10 @@ function generateTaskDetailsHtml(task: Task, parentTaskId?: string): string {
 <body>
     <div class="container">
         <div class="task-header">
-            <div class="task-hierarchy">${taskDisplayInfo.fullHierarchy}</div>
+                            <div class="task-hierarchy">
+                    ${taskDisplayInfo.fullHierarchy}
+                    ${taskDisplayInfo.tagInfo ? `<span class="tag-indicator">• ${taskDisplayInfo.tagInfo}</span>` : ''}
+                </div>
             <h1 class="task-title">
                 <span class="task-id">${isSubtask ? `Subtask ${task.id}` : `Task ${taskDisplayInfo.taskId}`}</span>
                 <span class="task-type-badge">${taskDisplayInfo.taskType}</span>
@@ -1620,7 +1721,7 @@ async function addNewTask(_categoryItem?: vscode.TreeItem): Promise<void> {
                 priority: taskData.priority || 'medium',
                 dependencies: Array.isArray(taskData.dependencies) ? taskData.dependencies : 
                               (taskData.dependencies ? [taskData.dependencies] : [])
-            }, true); // Force CLI usage
+            }, true, taskData.tagContext); // Force CLI usage, pass selected tag
             
             vscode.window.showInformationMessage(
                 `✅ Task "${taskData.title}" created via CLI!`
@@ -1628,9 +1729,9 @@ async function addNewTask(_categoryItem?: vscode.TreeItem): Promise<void> {
         } catch (cliError) {
             log(`CLI task creation failed, trying file creation: ${cliError}`);
             await saveNewTask(newTaskForSave);
-            vscode.window.showInformationMessage(
-                `✅ Task ${newTaskId}: "${taskData.title}" created successfully!`
-            );
+        vscode.window.showInformationMessage(
+            `✅ Task ${newTaskId}: "${taskData.title}" created successfully!`
+        );
         }
         
         // Refresh the tree view after a short delay
@@ -1708,14 +1809,22 @@ async function addNewSubtaskWithFallback(parentTask: Task): Promise<void> {
 
 async function expandTaskWithFallback(task: Task): Promise<void> {
     try {
-        // Show CLI fallback message
-        taskMasterClient.showCLIFallbackMessage(`Expanding task ${task.id}`);
+        const tagContext = taskMasterClient.getTagContext();
+        
+        // Show CLI fallback message with tag context
+        const tagInfo = tagContext.isTaggedFormat ? ` (Tag: ${tagContext.currentTag})` : '';
+        taskMasterClient.showCLIFallbackMessage(`Expanding task ${task.id}${tagInfo}`);
 
         // Ask user if they want to force replace existing subtasks
+        let placeHolder = 'How should we handle existing subtasks?';
+        if (tagContext.isTaggedFormat) {
+            placeHolder = `[Tag: ${tagContext.currentTag}] How should we handle existing subtasks?`;
+        }
+        
         const forceReplace = await vscode.window.showQuickPick(
             ['No - Append to existing subtasks', 'Yes - Replace existing subtasks'],
             {
-                placeHolder: 'How should we handle existing subtasks?',
+                placeHolder,
                 ignoreFocusOut: true
             }
         );
@@ -1726,6 +1835,9 @@ async function expandTaskWithFallback(task: Task): Promise<void> {
 
         const force = forceReplace.startsWith('Yes');
 
+        // Log expansion operation with tag context
+        log(`Expanding task ${task.id} with force=${force} in tag context: ${tagContext.currentTag}`);
+        
         // Use TaskMasterClient's CLI fallback method
         await taskMasterClient.expandTaskWithCLI(task.id, force);
         
@@ -1734,9 +1846,10 @@ async function expandTaskWithFallback(task: Task): Promise<void> {
             taskProvider.refresh();
         }, 2000);
         
-        vscode.window.showInformationMessage(
-            `✅ Task ${task.id} expanded via CLI!`
-        );
+        const successMessage = tagContext.isTaggedFormat 
+            ? `✅ Task ${task.id} expanded via CLI in tag: ${tagContext.currentTag}!`
+            : `✅ Task ${task.id} expanded via CLI!`;
+        vscode.window.showInformationMessage(successMessage);
 
     } catch (error) {
         vscode.window.showErrorMessage(`Failed to expand task: ${error}`);
@@ -1793,7 +1906,31 @@ async function createTaskInputForm(): Promise<TaskFormData | undefined> {
         }
     );
 
-    // Step 5: Dependencies (optional)
+    // Step 5: Tag Context Selection
+    const tagContext = taskMasterClient.getTagContext();
+    let selectedTag = tagContext.currentTag; // Default to current tag
+    
+    if (tagContext.isTaggedFormat && tagContext.availableTags.length > 1) {
+        const tagOptions = tagContext.availableTags.map(tag => ({
+            label: tag,
+            detail: tag === tagContext.currentTag ? 'Current tag' : 'Available tag',
+            picked: tag === tagContext.currentTag
+        }));
+        
+        const selectedTagOption = await vscode.window.showQuickPick(
+            tagOptions,
+            {
+                placeHolder: `Select tag context for new task (current: ${tagContext.currentTag})`,
+                canPickMany: false
+            }
+        );
+        
+        if (selectedTagOption) {
+            selectedTag = selectedTagOption.label;
+        }
+    }
+
+    // Step 6: Dependencies (optional)
     const tasks = await taskMasterClient.getTasks();
     const availableTasks = tasks.map(task => ({
         label: `${task.id}: ${task.title}`,
@@ -1821,7 +1958,8 @@ async function createTaskInputForm(): Promise<TaskFormData | undefined> {
         description: description?.trim() || '',
         priority: (priority?.label.toLowerCase() as TaskPriority) || 'medium',
         status: (status?.label as TaskStatus) || 'todo',
-        dependencies
+        dependencies,
+        tagContext: selectedTag
     };
 }
 
@@ -1904,6 +2042,9 @@ async function saveNewTask(task: TaskFormData): Promise<void> {
 
 async function editTask(task: Task): Promise<void> {
     try {
+        const tagContext = getTagContext(taskMasterClient);
+        logTagOperation('Edit Task Dialog', tagContext, { taskId: task.id, taskTitle: task.title });
+        
         // Create a comprehensive edit dialog for task properties
         const editData = await createTaskEditForm(task);
         
@@ -1917,9 +2058,11 @@ async function editTask(task: Task): Promise<void> {
         // Refresh the tree view
         taskProvider.refresh();
         
-        vscode.window.showInformationMessage(
-            `✅ Task ${task.id}: "${editData.title}" updated successfully!`
+        const successMessage = formatTagSuccessMessage(
+            `✅ Task ${task.id}: "${editData.title}" updated successfully!`,
+            tagContext
         );
+        vscode.window.showInformationMessage(successMessage);
 
     } catch (error) {
         vscode.window.showErrorMessage(`Failed to edit task: ${error}`);
@@ -1928,9 +2071,12 @@ async function editTask(task: Task): Promise<void> {
 
 async function editTaskTitle(task: Task): Promise<void> {
     try {
-        // Simple inline title editing
+        const tagContext = getTagContext(taskMasterClient);
+        logTagOperation('Edit Task Title', tagContext, { taskId: task.id, currentTitle: task.title });
+        
+        // Simple inline title editing with tag-aware prompt
         const newTitle = await vscode.window.showInputBox({
-            prompt: 'Enter new task title',
+            prompt: getTagAwarePlaceholder(tagContext, 'Enter new task title'),
             value: task.title,
             validateInput: (value) => {
                 if (!value || value.trim().length === 0) {
@@ -1953,9 +2099,11 @@ async function editTaskTitle(task: Task): Promise<void> {
         // Refresh the tree view
         taskProvider.refresh();
         
-        vscode.window.showInformationMessage(
-            `✅ Task ${task.id} title updated to "${newTitle}"`
+        const successMessage = formatTagSuccessMessage(
+            `✅ Task ${task.id} title updated to "${newTitle}"`,
+            tagContext
         );
+        vscode.window.showInformationMessage(successMessage);
 
     } catch (error) {
         vscode.window.showErrorMessage(`Failed to edit task title: ${error}`);
@@ -1964,9 +2112,16 @@ async function editTaskTitle(task: Task): Promise<void> {
 
 async function deleteTask(task: Task): Promise<void> {
     try {
-        // Confirmation dialog
+        const tagContext = getTagContext(taskMasterClient);
+        logTagOperation('Delete Task', tagContext, { taskId: task.id, taskTitle: task.title });
+        
+        // Confirmation dialog with tag context
+        const confirmMessage = tagContext.isTaggedFormat 
+            ? `[Tag: ${tagContext.currentTag}] Are you sure you want to delete Task ${task.id}: "${task.title}"?`
+            : `Are you sure you want to delete Task ${task.id}: "${task.title}"?`;
+            
         const confirm = await vscode.window.showWarningMessage(
-            `Are you sure you want to delete Task ${task.id}: "${task.title}"?`,
+            confirmMessage,
             { modal: true },
             'Delete',
             'Cancel'
@@ -1996,9 +2151,11 @@ async function deleteTask(task: Task): Promise<void> {
         // Refresh the tree view
         taskProvider.refresh();
         
-        vscode.window.showInformationMessage(
-            `🗑️ Task ${task.id}: "${task.title}" deleted successfully`
+        const successMessage = formatTagSuccessMessage(
+            `🗑️ Task ${task.id}: "${task.title}" deleted successfully`,
+            tagContext
         );
+        vscode.window.showInformationMessage(successMessage);
 
     } catch (error) {
         vscode.window.showErrorMessage(`Failed to delete task: ${error}`);
@@ -2191,6 +2348,107 @@ async function deleteMainTask(taskId: string): Promise<void> {
     }
 }
 
+/**
+ * Set task status with proper context handling for both main tasks and subtasks
+ */
+async function setTaskStatusWithContext(task: Task, newStatus: TaskStatus, parentTaskId?: string): Promise<void> {
+    try {
+        const oldStatus = task.status;
+        
+        if (oldStatus === newStatus) {
+            const logDetails: UserInteractionDetails = { 
+                taskId: task.id, 
+                status: newStatus as any
+            };
+            if (parentTaskId) {
+                logDetails.parentTaskId = parentTaskId;
+            }
+            logUserInteraction('Status change skipped - no change', logDetails, 'status-update');
+            vscode.window.showInformationMessage(`Task ${task.id} is already ${newStatus}`);
+            return;
+        }
+
+        const tagContext = taskMasterClient.getTagContext();
+        const executeLogDetails: UserInteractionDetails = { 
+            taskId: task.id, 
+            oldStatus: oldStatus as any, 
+            newStatus: newStatus as any,
+            taskTitle: task.title,
+            currentTag: tagContext.currentTag as any,
+            isTaggedFormat: tagContext.isTaggedFormat as any
+        };
+        if (parentTaskId) {
+            executeLogDetails.parentTaskId = parentTaskId;
+        }
+        logUserInteraction('Status change executing', executeLogDetails, 'status-update');
+
+        try {
+            // Determine if this is a subtask and use the appropriate method
+            if (parentTaskId) {
+                // This is a subtask - use the new setSubtaskStatus method
+                log(`Setting subtask status: subtaskId=${task.id}, parentTaskId=${parentTaskId}, status=${newStatus}`);
+                await taskMasterClient.setSubtaskStatus(parentTaskId, task.id, newStatus);
+            } else {
+                // This is a main task - use the regular setTaskStatus method
+                log(`Setting main task status: taskId=${task.id}, status=${newStatus}`);
+                await taskMasterClient.setTaskStatus(task.id, newStatus);
+            }
+        } catch (error) {
+            log(`Status update failed: ${error}`);
+            throw error;
+        }
+        
+        // Refresh the tree view
+        taskProvider.refresh();
+        
+        // Show status-specific messages
+        const statusMessages: { [key: string]: string } = {
+            'todo': `⭕ Task ${task.id} marked as todo`,
+            'in-progress': `🔄 Task ${task.id} marked as in progress`,
+            'completed': `✅ Task ${task.id} marked as completed`,
+            'blocked': `❌ Task ${task.id} marked as blocked`
+        };
+        
+        let message = statusMessages[newStatus] || `📝 Task ${task.id} status changed to ${newStatus}`;
+        
+        // Add parent context for subtasks
+        if (parentTaskId) {
+            message = message.replace(`Task ${task.id}`, `Subtask ${task.id} (in Task ${parentTaskId})`);
+        }
+        
+        vscode.window.showInformationMessage(message);
+        
+        const completedLogDetails: UserInteractionDetails = { 
+            taskId: task.id, 
+            oldStatus: oldStatus as any, 
+            newStatus: newStatus as any,
+            message: message as any,
+            currentTag: tagContext.currentTag as any,
+            isTaggedFormat: tagContext.isTaggedFormat as any
+        };
+        if (parentTaskId) {
+            completedLogDetails.parentTaskId = parentTaskId;
+        }
+        logUserInteraction('Status change completed', completedLogDetails, 'status-update');
+
+    } catch (error) {
+        const failedLogDetails: UserInteractionDetails = { 
+            taskId: task.id, 
+            targetStatus: newStatus as any,
+            error: error instanceof Error ? error.message : String(error)
+        };
+        if (parentTaskId) {
+            failedLogDetails.parentTaskId = parentTaskId;
+        }
+        logUserInteraction('Status change failed', failedLogDetails, 'status-update');
+        vscode.window.showErrorMessage(`Failed to change status: ${error}`);
+        throw error;
+    }
+}
+
+/**
+ * Legacy setTaskStatus function for backward compatibility
+ */
 async function setTaskStatus(task: Task, newStatus: TaskStatus): Promise<void> {
     try {
         const oldStatus = task.status;
@@ -2204,11 +2462,14 @@ async function setTaskStatus(task: Task, newStatus: TaskStatus): Promise<void> {
             return;
         }
 
+        const tagContext = taskMasterClient.getTagContext();
         logUserInteraction('Status change executing', { 
             taskId: task.id, 
             oldStatus, 
             newStatus,
-            taskTitle: task.title
+            taskTitle: task.title,
+            currentTag: tagContext.currentTag,
+            isTaggedFormat: tagContext.isTaggedFormat
         }, 'status-update');
 
         try {
@@ -2217,10 +2478,10 @@ async function setTaskStatus(task: Task, newStatus: TaskStatus): Promise<void> {
         } catch (cliError) {
             log(`CLI status update failed, trying file update: ${cliError}`);
             // Fallback to direct file update
-            await updateTaskData(task.id, { 
-                status: newStatus,
-                updated: new Date().toISOString()
-            });
+        await updateTaskData(task.id, { 
+            status: newStatus,
+            updated: new Date().toISOString()
+        });
         }
         
         // Refresh the tree view
@@ -2241,7 +2502,9 @@ async function setTaskStatus(task: Task, newStatus: TaskStatus): Promise<void> {
             taskId: task.id, 
             oldStatus, 
             newStatus,
-            message
+            message,
+            currentTag: tagContext.currentTag,
+            isTaggedFormat: tagContext.isTaggedFormat
         }, 'status-update');
 
     } catch (error) {
@@ -2265,12 +2528,21 @@ async function setTaskStatusInteractive(task: Task): Promise<void> {
         ];
         
         const currentStatus = task.status || 'todo';
+        const tagContext = taskMasterClient.getTagContext();
         
         logUserInteraction('Status picker opened', { 
             taskId: task.id,
             currentStatus,
+            currentTag: tagContext.currentTag,
+            isTaggedFormat: tagContext.isTaggedFormat,
             availableOptions: statusOptions.map(o => o.value)
         }, 'status-dialog');
+        
+        // Create placeholder text that includes tag context information
+        let placeHolder = `Current status: ${currentStatus}. Select new status:`;
+        if (tagContext.isTaggedFormat) {
+            placeHolder = `[Tag: ${tagContext.currentTag}] Current status: ${currentStatus}. Select new status:`;
+        }
         
         const status = await vscode.window.showQuickPick(
             statusOptions.map(s => ({
@@ -2278,7 +2550,7 @@ async function setTaskStatusInteractive(task: Task): Promise<void> {
                 picked: s.value === currentStatus
             })),
             {
-                placeHolder: `Current status: ${currentStatus}. Select new status:`,
+                placeHolder,
                 canPickMany: false
             }
         );
@@ -2315,6 +2587,9 @@ async function setTaskStatusInteractive(task: Task): Promise<void> {
 
 async function changePriority(task: Task): Promise<void> {
     try {
+        const tagContext = getTagContext(taskMasterClient);
+        logTagOperation('Change Priority', tagContext, { taskId: task.id, currentPriority: task.priority });
+        
         const priorityOptions = [
             { label: 'Critical', detail: 'Blocking other work', value: 'critical' },
             { label: 'High', detail: 'Important and urgent', value: 'high' },
@@ -2323,13 +2598,18 @@ async function changePriority(task: Task): Promise<void> {
         ];
         
         const currentPriority = task.priority || 'medium';
+        const placeHolder = getTagAwarePlaceholder(
+            tagContext, 
+            `Current priority: ${currentPriority}. Select new priority:`
+        );
+        
         const priority = await vscode.window.showQuickPick(
             priorityOptions.map(p => ({
                 ...p,
                 picked: p.value === currentPriority
             })),
             {
-                placeHolder: `Current priority: ${currentPriority}. Select new priority:`,
+                placeHolder,
                 canPickMany: false
             }
         );
@@ -2347,9 +2627,11 @@ async function changePriority(task: Task): Promise<void> {
         // Refresh the tree view
         taskProvider.refresh();
         
-        vscode.window.showInformationMessage(
-            `⭐ Task ${task.id} priority changed to ${priority.value}`
+        const successMessage = formatTagSuccessMessage(
+            `⭐ Task ${task.id} priority changed to ${priority.value}`,
+            tagContext
         );
+        vscode.window.showInformationMessage(successMessage);
 
     } catch (error) {
         vscode.window.showErrorMessage(`Failed to change priority: ${error}`);
@@ -2358,6 +2640,12 @@ async function changePriority(task: Task): Promise<void> {
 
 async function setDependencies(task: Task): Promise<void> {
     try {
+        const tagContext = getTagContext(taskMasterClient);
+        logTagOperation('Set Dependencies', tagContext, { 
+            taskId: task.id, 
+            currentDependencies: task.dependencies 
+        });
+        
         // Get all available tasks (excluding self)
         const tasks = await taskMasterClient.getTasks();
         const availableTasks = tasks
@@ -2370,14 +2658,23 @@ async function setDependencies(task: Task): Promise<void> {
             }));
 
         if (availableTasks.length === 0) {
-            vscode.window.showInformationMessage('No other tasks available to set as dependencies.');
+            const message = formatTagSuccessMessage(
+                'No other tasks available to set as dependencies.',
+                tagContext
+            );
+            vscode.window.showInformationMessage(message);
             return;
         }
 
+        const placeHolder = getTagAwarePlaceholder(
+            tagContext,
+            'Select dependencies (tasks that must be completed before this task)'
+        );
+        
         const selectedDeps = await vscode.window.showQuickPick(
             availableTasks,
             {
-                placeHolder: 'Select dependencies (tasks that must be completed before this task)',
+                placeHolder,
                 canPickMany: true
             }
         );
@@ -2397,15 +2694,16 @@ async function setDependencies(task: Task): Promise<void> {
         // Refresh the tree view
         taskProvider.refresh();
         
+        let successMessage: string;
         if (newDependencies.length === 0) {
-            vscode.window.showInformationMessage(
-                `🔗 Task ${task.id} dependencies cleared`
-            );
+            successMessage = `🔗 Task ${task.id} dependencies cleared`;
         } else {
-            vscode.window.showInformationMessage(
-                `🔗 Task ${task.id} now depends on: ${newDependencies.join(', ')}`
-            );
+            successMessage = `🔗 Task ${task.id} now depends on: ${newDependencies.join(', ')}`;
         }
+        
+        vscode.window.showInformationMessage(
+            formatTagSuccessMessage(successMessage, tagContext)
+        );
 
     } catch (error) {
         vscode.window.showErrorMessage(`Failed to set dependencies: ${error}`);
@@ -2414,7 +2712,10 @@ async function setDependencies(task: Task): Promise<void> {
 
 async function copyTaskDetails(task: Task): Promise<void> {
     try {
-        const details = `Task ${task.id}: ${task.title}
+        const tagContext = getTagContext(taskMasterClient);
+        logTagOperation('Copy Task Details', tagContext, { taskId: task.id });
+        
+        let details = `Task ${task.id}: ${task.title}
 Status: ${task.status}
 Priority: ${task.priority || 'Not set'}
 Description: ${task.description || 'No description'}
@@ -2430,8 +2731,20 @@ Subtasks: ${task.subtasks?.length || 0} subtask(s)
 Test Strategy:
 ${task.testStrategy || 'No test strategy defined'}`;
 
+        // Add tag context information if in tagged format
+        if (tagContext.isTaggedFormat) {
+            details = `Tag Context: ${tagContext.currentTag}
+
+${details}`;
+        }
+
         await vscode.env.clipboard.writeText(details);
-        vscode.window.showInformationMessage(`📋 Task ${task.id} details copied to clipboard`);
+        
+        const successMessage = formatTagSuccessMessage(
+            `📋 Task ${task.id} details copied to clipboard`,
+            tagContext
+        );
+        vscode.window.showInformationMessage(successMessage);
     } catch (error) {
         vscode.window.showErrorMessage(`Failed to copy task details: ${error}`);
     }
@@ -2545,7 +2858,264 @@ async function expandAllTasks(treeView: vscode.TreeView<vscode.TreeItem>): Promi
 // Removed collapseAllTasks function - not currently used
 // Can be re-added when collapse all command is implemented
 
+// Tag Management Handler Functions
+async function switchTagHandler(): Promise<void> {
+    try {
+        const tagContext = getTagContext(taskMasterClient);
+        logTagOperation('Switch Tag Handler', tagContext);
+        
+        if (!tagContext.isTaggedFormat) {
+            vscode.window.showInformationMessage('This project is not using the tagged task format. No tags to switch between.');
+            return;
+        }
+        
+        if (tagContext.availableTags.length <= 1) {
+            vscode.window.showInformationMessage('Only one tag available. Create additional tags to switch between them.');
+            return;
+        }
+        
+        const tagOptions = tagContext.availableTags.map(tag => ({
+            label: tag,
+            detail: tag === tagContext.currentTag ? '✓ Current tag' : 'Available tag',
+            description: tag === 'master' ? 'Default tag' : ''
+        }));
+        
+        const selectedTag = await vscode.window.showQuickPick(tagOptions, {
+            placeHolder: `Current tag: ${tagContext.currentTag} • Select a tag to switch to`,
+            ignoreFocusOut: true
+        });
+        
+        if (!selectedTag) {
+            return; // User cancelled
+        }
+        
+        if (selectedTag.label === tagContext.currentTag) {
+            vscode.window.showInformationMessage(`Already using tag: ${selectedTag.label}`);
+            return;
+        }
+        
+        // Switch to the selected tag
+        await taskProvider.switchTag(selectedTag.label);
+        
+        // Update status bar to reflect the tag change
+        tagStatusBar.forceUpdate();
+        
+        const successMessage = `🏷️ Switched to tag: ${selectedTag.label}`;
+        vscode.window.showInformationMessage(successMessage);
+        
+        log(`Successfully switched from tag '${tagContext.currentTag}' to '${selectedTag.label}'`);
+        
+    } catch (error) {
+        vscode.window.showErrorMessage(`Failed to switch tag: ${error}`);
+        log(`Error in switchTagHandler: ${error}`);
+    }
+}
+
+async function createTagHandler(): Promise<void> {
+    try {
+        const tagContext = getTagContext(taskMasterClient);
+        logTagOperation('Create Tag Handler', tagContext);
+        
+        if (!tagContext.isTaggedFormat) {
+            vscode.window.showInformationMessage('This project is not using the tagged task format. Initialize tagged format first.');
+            return;
+        }
+        
+        const tagName = await vscode.window.showInputBox({
+            placeHolder: 'Enter new tag name (e.g., feature-branch, sprint-2)',
+            prompt: 'Create a new tag for organizing tasks',
+            validateInput: (value: string) => {
+                if (!value || value.trim().length === 0) {
+                    return 'Tag name cannot be empty';
+                }
+                if (value.includes(' ')) {
+                    return 'Tag name cannot contain spaces. Use hyphens or underscores instead.';
+                }
+                if (tagContext.availableTags.includes(value.trim())) {
+                    return 'Tag already exists. Choose a different name.';
+                }
+                if (value.length > 50) {
+                    return 'Tag name is too long. Keep it under 50 characters.';
+                }
+                return null;
+            }
+        });
+        
+        if (!tagName) {
+            return; // User cancelled
+        }
+        
+        const trimmedTagName = tagName.trim();
+        
+        // Create the tag via TaskMasterClient
+        await taskMasterClient.createTag(trimmedTagName);
+        
+        // Ask if user wants to switch to the new tag
+        const switchToNew = await vscode.window.showInformationMessage(
+            `✅ Tag '${trimmedTagName}' created successfully!`,
+            'Switch to New Tag',
+            'Stay on Current Tag'
+        );
+        
+        if (switchToNew === 'Switch to New Tag') {
+            await taskProvider.switchTag(trimmedTagName);
+            vscode.window.showInformationMessage(`🏷️ Switched to new tag: ${trimmedTagName}`);
+        }
+        
+        // Update status bar to reflect the changes
+        tagStatusBar.forceUpdate();
+        
+        log(`Successfully created tag '${trimmedTagName}'`);
+        
+    } catch (error) {
+        vscode.window.showErrorMessage(`Failed to create tag: ${error}`);
+        log(`Error in createTagHandler: ${error}`);
+    }
+}
+
+async function deleteTagHandler(): Promise<void> {
+    try {
+        const tagContext = getTagContext(taskMasterClient);
+        logTagOperation('Delete Tag Handler', tagContext);
+        
+        if (!tagContext.isTaggedFormat) {
+            vscode.window.showInformationMessage('This project is not using the tagged task format. No tags to delete.');
+            return;
+        }
+        
+        // Filter out master tag from deletion options
+        const deletableTags = tagContext.availableTags.filter(tag => tag !== 'master');
+        
+        if (deletableTags.length === 0) {
+            vscode.window.showInformationMessage('No tags available for deletion. The master tag cannot be deleted.');
+            return;
+        }
+        
+        const tagOptions = deletableTags.map(tag => ({
+            label: tag,
+            detail: tag === tagContext.currentTag ? '⚠️ Current tag - will switch to master after deletion' : 'Available for deletion',
+            description: 'Click to delete this tag and all its tasks'
+        }));
+        
+        const selectedTag = await vscode.window.showQuickPick(tagOptions, {
+            placeHolder: 'Select a tag to delete (master tag cannot be deleted)',
+            ignoreFocusOut: true
+        });
+        
+        if (!selectedTag) {
+            return; // User cancelled
+        }
+        
+        // Confirm deletion
+        const confirmMessage = selectedTag.label === tagContext.currentTag
+            ? `⚠️ You are about to delete the current tag '${selectedTag.label}' and ALL its tasks. You will be switched to the master tag. This action cannot be undone.`
+            : `⚠️ You are about to delete tag '${selectedTag.label}' and ALL its tasks. This action cannot be undone.`;
+            
+        const confirmation = await vscode.window.showWarningMessage(
+            confirmMessage,
+            { modal: true },
+            'Delete Tag',
+            'Cancel'
+        );
+        
+        if (confirmation !== 'Delete Tag') {
+            return; // User cancelled
+        }
+        
+        // Delete the tag via TaskMasterClient
+        await taskMasterClient.deleteTag(selectedTag.label);
+        
+        // If we deleted the current tag, switch to master
+        if (selectedTag.label === tagContext.currentTag) {
+            await taskProvider.switchTag('master');
+            vscode.window.showInformationMessage(`🗑️ Tag '${selectedTag.label}' deleted. Switched to master tag.`);
+        } else {
+            vscode.window.showInformationMessage(`🗑️ Tag '${selectedTag.label}' deleted successfully.`);
+        }
+        
+        // Update status bar to reflect the changes
+        tagStatusBar.forceUpdate();
+        
+        log(`Successfully deleted tag '${selectedTag.label}'`);
+        
+    } catch (error) {
+        vscode.window.showErrorMessage(`Failed to delete tag: ${error}`);
+        log(`Error in deleteTagHandler: ${error}`);
+    }
+}
+
+async function listTagsHandler(): Promise<void> {
+    try {
+        const tagContext = getTagContext(taskMasterClient);
+        logTagOperation('List Tags Handler', tagContext);
+        
+        if (!tagContext.isTaggedFormat) {
+            vscode.window.showInformationMessage('This project is not using the tagged task format. No tags available.');
+            return;
+        }
+        
+        // Get detailed tag information
+        const tagInfoList: string[] = [];
+        
+        for (const tagName of tagContext.availableTags) {
+            const isCurrentTag = tagName === tagContext.currentTag;
+            const tasks = await taskMasterClient.getTasks(); // This gets tasks for current tag
+            
+            let taskCount = 0;
+            if (isCurrentTag) {
+                taskCount = tasks.length;
+            } else {
+                // Switch temporarily to get task count for other tags
+                try {
+                    await taskMasterClient.switchTag(tagName);
+                    const otherTasks = await taskMasterClient.getTasks();
+                    taskCount = otherTasks.length;
+                } catch (error) {
+                    log(`Error getting task count for tag '${tagName}': ${error}`);
+                    taskCount = 0;
+                }
+            }
+            
+            const currentIndicator = isCurrentTag ? ' ✓ (current)' : '';
+            const masterIndicator = tagName === 'master' ? ' (default)' : '';
+            tagInfoList.push(`🏷️ ${tagName}${currentIndicator}${masterIndicator} - ${taskCount} task(s)`);
+        }
+        
+        // Switch back to original tag if we switched
+        if (tagContext.currentTag !== await taskMasterClient.getCurrentTag()) {
+            await taskMasterClient.switchTag(tagContext.currentTag);
+        }
+        
+        const tagListMessage = `Available Tags:\n\n${tagInfoList.join('\n')}\n\nTotal: ${tagContext.availableTags.length} tag(s)`;
+        
+        const action = await vscode.window.showInformationMessage(
+            tagListMessage,
+            'Switch Tag',
+            'Create New Tag',
+            'Close'
+        );
+        
+        if (action === 'Switch Tag') {
+            await switchTagHandler();
+        } else if (action === 'Create New Tag') {
+            await createTagHandler();
+        }
+        
+        log(`Listed ${tagContext.availableTags.length} tags`);
+        
+    } catch (error) {
+        vscode.window.showErrorMessage(`Failed to list tags: ${error}`);
+        log(`Error in listTagsHandler: ${error}`);
+    }
+}
+
 export function deactivate() {
     log('Deactivating Claude Task Master extension.');
+    
+    // Dispose of status bar
+    if (tagStatusBar) {
+        tagStatusBar.dispose();
+    }
+    
     disposeLogger();
 } 

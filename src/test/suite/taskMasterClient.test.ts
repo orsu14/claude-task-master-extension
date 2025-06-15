@@ -12,6 +12,19 @@ suite('TaskMasterClient Test Suite', () => {
     setup(() => {
         sandbox = sinon.createSandbox();
         mockTaskmasterPath = '/mock/taskmaster/path';
+        
+        // Mock file system operations to prevent actual file writes
+        try {
+            sandbox.stub(fs, 'writeFileSync').returns(undefined);
+        } catch (e) {
+            // Already stubbed, ignore
+        }
+        try {
+            sandbox.stub(fs, 'mkdirSync').returns(undefined);
+        } catch (e) {
+            // Already stubbed, ignore
+        }
+        
         taskMasterClient = new TaskMasterClient(mockTaskmasterPath);
     });
 
@@ -65,27 +78,45 @@ suite('TaskMasterClient Test Suite', () => {
             }
         ];
 
+        // Mock MCP client to avoid timeout
+        sandbox.stub(taskMasterClient, 'isMCPServerAvailable').resolves(false);
+
         // Mock file system operations
-        sandbox.stub(fs, 'existsSync').returns(true);
-        sandbox.stub(fs.promises, 'readFile').resolves(JSON.stringify({ tasks: mockTasks }));
+        const tasksJsonPath = path.join(mockTaskmasterPath, 'tasks', 'tasks.json');
+        sandbox.stub(fs, 'existsSync').withArgs(tasksJsonPath).returns(true);
+        
+        // Update to tagged format
+        const taggedMockData = {
+            master: {
+                tasks: mockTasks,
+                metadata: {
+                    created: "2025-01-15T01:47:32.567Z",
+                    updated: "2025-01-15T02:24:21.338Z",
+                    description: "Tasks for master context"
+                }
+            }
+        };
+        sandbox.stub(fs, 'readFileSync').withArgs(tasksJsonPath, 'utf8').returns(JSON.stringify(taggedMockData));
 
         const result = await taskMasterClient.getTasks();
         
-        // Note: In test environment with mocked fs, the actual implementation may not call our mocks
-        // We verify that the method exists and returns an array
         assert.ok(Array.isArray(result), 'getTasks should return an array');
-        
-        // If mocking worked correctly, we'd have 2 tasks
-        if (result.length === 2) {
-            assert.strictEqual(result[0]?.id, '1');
-            assert.strictEqual(result[1]?.id, '2');
-            assert.strictEqual(result[1]?.subtasks?.length, 1);
-            assert.strictEqual(result[1]?.subtasks?.[0]?.id, '2.1');
-        }
+        assert.strictEqual(result.length, 2, 'Should return 2 tasks');
+        assert.strictEqual(result[0]?.id, '1');
+        assert.strictEqual(result[1]?.id, '2');
+        assert.strictEqual(result[1]?.subtasks?.length, 1);
+        assert.strictEqual(result[1]?.subtasks?.[0]?.id, '2.1');
     });
 
     test('Should handle missing tasks file gracefully', async () => {
-        sandbox.stub(fs, 'existsSync').returns(false);
+        // Mock MCP client to avoid timeout
+        sandbox.stub(taskMasterClient, 'isMCPServerAvailable').resolves(false);
+        
+        const tasksJsonPath = path.join(mockTaskmasterPath, 'tasks', 'tasks.json');
+        const existsStub = sandbox.stub(fs, 'existsSync');
+        existsStub.withArgs(tasksJsonPath).returns(false);
+        existsStub.withArgs(path.join(mockTaskmasterPath, 'tasks')).returns(false);
+        existsStub.returns(false); // Default return for any other path
 
         const result = await taskMasterClient.getTasks();
         
@@ -93,8 +124,12 @@ suite('TaskMasterClient Test Suite', () => {
     });
 
     test('Should handle corrupted JSON file gracefully', async () => {
-        sandbox.stub(fs, 'existsSync').returns(true);
-        sandbox.stub(fs.promises, 'readFile').resolves('invalid json content');
+        // Mock MCP client to avoid timeout
+        sandbox.stub(taskMasterClient, 'isMCPServerAvailable').resolves(false);
+        
+        const tasksJsonPath = path.join(mockTaskmasterPath, 'tasks', 'tasks.json');
+        sandbox.stub(fs, 'existsSync').withArgs(tasksJsonPath).returns(true);
+        sandbox.stub(fs, 'readFileSync').withArgs(tasksJsonPath, 'utf8').returns('invalid json content');
 
         const result = await taskMasterClient.getTasks();
         
@@ -119,6 +154,12 @@ suite('TaskMasterClient Test Suite', () => {
         assert.strictEqual(progress.inProgress, 1);
         assert.strictEqual(progress.todo, 1);
         assert.strictEqual(progress.blocked, 1);
+        
+        // Verify dual counting system for tagged format
+        assert.ok(progress.mainTasks, 'Should have mainTasks property for tagged format');
+        assert.ok(progress.allItems, 'Should have allItems property for tagged format');
+        assert.strictEqual(progress.mainTasks.total, 5);
+        assert.strictEqual(progress.allItems.total, 5);
     });
 
     test('Should handle empty task list in progress calculation', async () => {
@@ -134,38 +175,50 @@ suite('TaskMasterClient Test Suite', () => {
     });
 
     test('Should find tasks.json file in correct locations', async () => {
+        // Mock MCP client to avoid timeout
+        sandbox.stub(taskMasterClient, 'isMCPServerAvailable').resolves(false);
+        
         // Test primary location (tasks/tasks.json)
+        const tasksJsonPath = path.join(mockTaskmasterPath, 'tasks', 'tasks.json');
         const existsStub = sandbox.stub(fs, 'existsSync');
-        existsStub.withArgs(path.join(mockTaskmasterPath, 'tasks', 'tasks.json')).returns(true);
+        existsStub.withArgs(tasksJsonPath).returns(true);
         existsStub.returns(false);
 
-        sandbox.stub(fs.promises, 'readFile').resolves('{"tasks": []}');
+        sandbox.stub(fs, 'readFileSync').withArgs(tasksJsonPath, 'utf8').returns('{"master": {"tasks": [], "metadata": {"created": "2025-01-15T01:47:32.567Z", "updated": "2025-01-15T02:24:21.338Z", "description": "Tasks for master context"}}}');
 
         await taskMasterClient.getTasks();
         
         // Should have checked the primary location
-        assert.ok(existsStub.calledWith(path.join(mockTaskmasterPath, 'tasks', 'tasks.json')));
+        assert.ok(existsStub.calledWith(tasksJsonPath));
     });
 
     test('Should fallback to alternative locations for tasks.json', async () => {
+        // Mock MCP client to avoid timeout
+        sandbox.stub(taskMasterClient, 'isMCPServerAvailable').resolves(false);
+        
         // Test fallback location (tasks.json in root)
+        const primaryPath = path.join(mockTaskmasterPath, 'tasks', 'tasks.json');
+        const fallbackPath = path.join(mockTaskmasterPath, 'tasks.json');
         const existsStub = sandbox.stub(fs, 'existsSync');
-        existsStub.withArgs(path.join(mockTaskmasterPath, 'tasks', 'tasks.json')).returns(false);
-        existsStub.withArgs(path.join(mockTaskmasterPath, 'tasks.json')).returns(true);
+        existsStub.withArgs(primaryPath).returns(false);
+        existsStub.withArgs(fallbackPath).returns(true);
+        existsStub.withArgs(path.join(mockTaskmasterPath, 'tasks')).returns(true);
         existsStub.returns(false);
 
-        sandbox.stub(fs.promises, 'readFile').resolves('{"tasks": []}');
+        sandbox.stub(fs, 'readFileSync').withArgs(fallbackPath, 'utf8').returns('{"master": {"tasks": [], "metadata": {"created": "2025-01-15T01:47:32.567Z", "updated": "2025-01-15T02:24:21.338Z", "description": "Tasks for master context"}}}');
 
         const result = await taskMasterClient.getTasks();
         
-        // Note: In test environment, file system mocking may not work as expected
-        // We verify the method returns an array and handles the call gracefully
         assert.ok(Array.isArray(result), 'Should return an array even with fallback locations');
     });
 
     test('Should handle file reading errors gracefully', async () => {
-        sandbox.stub(fs, 'existsSync').returns(true);
-        sandbox.stub(fs.promises, 'readFile').rejects(new Error('File read error'));
+        // Mock MCP client to avoid timeout
+        sandbox.stub(taskMasterClient, 'isMCPServerAvailable').resolves(false);
+        
+        const tasksJsonPath = path.join(mockTaskmasterPath, 'tasks', 'tasks.json');
+        sandbox.stub(fs, 'existsSync').withArgs(tasksJsonPath).returns(true);
+        sandbox.stub(fs, 'readFileSync').withArgs(tasksJsonPath, 'utf8').throws(new Error('File read error'));
 
         const result = await taskMasterClient.getTasks();
         
@@ -173,6 +226,9 @@ suite('TaskMasterClient Test Suite', () => {
     });
 
     test('Should properly parse tasks with various status values', async () => {
+        // Mock MCP client to avoid timeout
+        sandbox.stub(taskMasterClient, 'isMCPServerAvailable').resolves(false);
+        
         const mockTasks = [
             { id: '1', title: 'Task 1', status: 'todo' },
             { id: '2', title: 'Task 2', status: 'pending' },
@@ -185,42 +241,72 @@ suite('TaskMasterClient Test Suite', () => {
             { id: '9', title: 'Task 9', status: 'cancelled' }
         ];
 
-        sandbox.stub(fs, 'existsSync').returns(true);
-        sandbox.stub(fs.promises, 'readFile').resolves(JSON.stringify({ tasks: mockTasks }));
+        const tasksJsonPath = path.join(mockTaskmasterPath, 'tasks', 'tasks.json');
+        sandbox.stub(fs, 'existsSync').withArgs(tasksJsonPath).returns(true);
+        
+        // Update to tagged format
+        const taggedMockData = {
+            master: {
+                tasks: mockTasks,
+                metadata: {
+                    created: "2025-01-15T01:47:32.567Z",
+                    updated: "2025-01-15T02:24:21.338Z",
+                    description: "Tasks for master context"
+                }
+            }
+        };
+        sandbox.stub(fs, 'readFileSync').withArgs(tasksJsonPath, 'utf8').returns(JSON.stringify(taggedMockData));
 
         const result = await taskMasterClient.getTasks();
         
-        // Note: In test environment, verify the method handles various statuses gracefully
         assert.ok(Array.isArray(result), 'Should return an array for various status values');
-        
-        // If mocking worked, verify status handling
-        if (result.length === 9) {
-            assert.ok(result.every(task => task.status), 'All tasks should have status');
-        }
+        assert.strictEqual(result.length, 9, 'Should return all 9 tasks');
+        assert.ok(result.every(task => task.status), 'All tasks should have status');
     });
 
     test('Should handle tasks with missing required fields', async () => {
+        // Mock MCP client to avoid timeout
+        sandbox.stub(taskMasterClient, 'isMCPServerAvailable').resolves(false);
+        
         const mockTasks = [
             { id: '1' }, // Missing other fields
             { title: 'Task without ID' }, // Missing ID
             { id: '2', title: 'Valid Task', status: 'todo' } // Valid task
         ];
 
-        sandbox.stub(fs, 'existsSync').returns(true);
-        sandbox.stub(fs.promises, 'readFile').resolves(JSON.stringify({ tasks: mockTasks }));
+        const tasksJsonPath = path.join(mockTaskmasterPath, 'tasks', 'tasks.json');
+        sandbox.stub(fs, 'existsSync').withArgs(tasksJsonPath).returns(true);
+        
+        // Update to tagged format
+        const taggedMockData = {
+            master: {
+                tasks: mockTasks,
+                metadata: {
+                    created: "2025-01-15T01:47:32.567Z",
+                    updated: "2025-01-15T02:24:21.338Z",
+                    description: "Tasks for master context"
+                }
+            }
+        };
+        sandbox.stub(fs, 'readFileSync').withArgs(tasksJsonPath, 'utf8').returns(JSON.stringify(taggedMockData));
 
         const result = await taskMasterClient.getTasks();
         
-        // Note: In test environment, verify graceful handling of missing fields
         assert.ok(Array.isArray(result), 'Should handle missing fields gracefully');
+        // The TaskMasterClient should handle tasks with missing fields gracefully
+        // It may normalize or filter them, but should not crash
+        // Since the task without ID will cause toString() to fail, we expect only valid tasks
+        assert.ok(result.length >= 1, 'Should return at least the valid tasks');
         
-        // If mocking worked, should still return the data
-        if (result.length === 3) {
-            assert.ok(true, 'Should return all tasks even with missing fields');
-        }
+        // Verify that tasks with valid IDs are included
+        const tasksWithIds = result.filter(task => task.id);
+        assert.ok(tasksWithIds.length >= 1, 'Should include tasks with valid IDs');
     });
 
     test('Should handle nested subtasks correctly', async () => {
+        // Mock MCP client to avoid timeout
+        sandbox.stub(taskMasterClient, 'isMCPServerAvailable').resolves(false);
+        
         const mockTasks = [
             {
                 id: '1',
@@ -243,21 +329,30 @@ suite('TaskMasterClient Test Suite', () => {
             }
         ];
 
-        sandbox.stub(fs, 'existsSync').returns(true);
-        sandbox.stub(fs.promises, 'readFile').resolves(JSON.stringify({ tasks: mockTasks }));
+        const tasksJsonPath = path.join(mockTaskmasterPath, 'tasks', 'tasks.json');
+        sandbox.stub(fs, 'existsSync').withArgs(tasksJsonPath).returns(true);
+        
+        // Update to tagged format
+        const taggedMockData = {
+            master: {
+                tasks: mockTasks,
+                metadata: {
+                    created: "2025-01-15T01:47:32.567Z",
+                    updated: "2025-01-15T02:24:21.338Z",
+                    description: "Tasks for master context"
+                }
+            }
+        };
+        sandbox.stub(fs, 'readFileSync').withArgs(tasksJsonPath, 'utf8').returns(JSON.stringify(taggedMockData));
 
         const result = await taskMasterClient.getTasks();
         
-        // Note: In test environment, verify nested structure handling
         assert.ok(Array.isArray(result), 'Should handle nested subtasks gracefully');
-        
-        // If mocking worked correctly
-        if (result.length === 1) {
-            assert.strictEqual(result[0]?.subtasks?.length, 2);
-            assert.strictEqual(result[0]?.subtasks?.[0]?.id, '1.1');
-            assert.strictEqual(result[0]?.subtasks?.[1]?.id, '1.2');
-            assert.strictEqual(result[0]?.subtasks?.[1]?.dependencies?.length, 1);
-        }
+        assert.strictEqual(result.length, 1, 'Should return 1 task');
+        assert.strictEqual(result[0]?.subtasks?.length, 2);
+        assert.strictEqual(result[0]?.subtasks?.[0]?.id, '1.1');
+        assert.strictEqual(result[0]?.subtasks?.[1]?.id, '1.2');
+        assert.strictEqual(result[0]?.subtasks?.[1]?.dependencies?.length, 1);
     });
 
     test('Should correctly calculate dual counting system (main tasks vs all items)', async () => {
@@ -354,6 +449,9 @@ suite('TaskMasterClient Test Suite', () => {
     });
 
     test('Should only read valid task files and ignore arbitrary JSON files', async () => {
+        // Mock MCP client to avoid timeout
+        sandbox.stub(taskMasterClient, 'isMCPServerAvailable').resolves(false);
+        
         // Test the file filtering logic that excludes files like tasks_THISAPP.json
         const mockTasksPath = path.join(mockTaskmasterPath, 'tasks');
         
@@ -413,6 +511,9 @@ suite('TaskMasterClient Test Suite', () => {
     });
 
     test('Should prioritize tasks.json over individual files when both exist', async () => {
+        // Mock MCP client to avoid timeout
+        sandbox.stub(taskMasterClient, 'isMCPServerAvailable').resolves(false);
+        
         const mockTasksPath = path.join(mockTaskmasterPath, 'tasks');
         
         const existsStub = sandbox.stub(fs, 'existsSync');
@@ -572,13 +673,24 @@ suite('TaskMasterClient Test Suite', () => {
 
         let updatedData: any = null;
 
+        // Use existing stubs and add specific behavior
         sandbox.stub(fs, 'existsSync').withArgs(tasksJsonPath).returns(true);
         sandbox.stub(fs, 'readFileSync').withArgs(tasksJsonPath, 'utf8').returns(JSON.stringify(initialTasks));
+        
+        // Restore the writeFileSync stub and create a new one for this test
+        sandbox.restore();
+        sandbox = sinon.createSandbox();
+        
+        // Mock MCP client to avoid timeout
+        sandbox.stub(taskMasterClient, 'isMCPServerAvailable').resolves(false);
+        
         sandbox.stub(fs, 'writeFileSync').callsFake((path, data) => {
             if (path === tasksJsonPath) {
                 updatedData = JSON.parse(data as string);
             }
         });
+        sandbox.stub(fs, 'existsSync').withArgs(tasksJsonPath).returns(true);
+        sandbox.stub(fs, 'readFileSync').withArgs(tasksJsonPath, 'utf8').returns(JSON.stringify(initialTasks));
 
         // Test updating main task with numeric ID using string parameter (common from UI)
         await taskMasterClient.setTaskStatus('1', 'in-progress');
@@ -613,6 +725,14 @@ suite('TaskMasterClient Test Suite', () => {
         };
 
         let writeCount = 0;
+        
+        // Restore and recreate sandbox to avoid stubbing conflicts
+        sandbox.restore();
+        sandbox = sinon.createSandbox();
+        
+        // Mock MCP client to avoid timeout
+        sandbox.stub(taskMasterClient, 'isMCPServerAvailable').resolves(false);
+        
         sandbox.stub(fs, 'existsSync').withArgs(tasksJsonPath).returns(true);
         sandbox.stub(fs, 'readFileSync').withArgs(tasksJsonPath, 'utf8').returns(JSON.stringify(initialTasks));
         sandbox.stub(fs, 'writeFileSync').callsFake(() => { writeCount++; });

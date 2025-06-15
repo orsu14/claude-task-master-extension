@@ -9,6 +9,16 @@ class MockTaskMasterClient extends TaskMasterClient {
     private mockProgress = { total: 0, completed: 0, inProgress: 0, todo: 0, blocked: 0 };
 
     constructor() {
+        // Mock file system operations before calling super
+        const fs = require('fs');
+        const sinon = require('sinon');
+        try {
+            sinon.stub(fs, 'writeFileSync').returns(undefined);
+            sinon.stub(fs, 'mkdirSync').returns(undefined);
+            sinon.stub(fs, 'existsSync').returns(false);
+        } catch (e) {
+            // Already stubbed, ignore
+        }
         super('.taskmaster'); // Provide required path parameter
     }
 
@@ -355,6 +365,19 @@ suite('TaskProvider Test Suite', () => {
         // Should show main task progress: 2 completed out of 8 total = 25%
         assert.ok(progressOverview?.description?.includes('25%'), 'Should show main task percentage');
         assert.ok(progressOverview?.description?.includes('(2/8 tasks)'), 'Should show main task counts');
+
+        // Verify that TaskMasterClient properly handles tagged format compatibility
+        // The mock returns tasks directly, but real client should handle tagged format
+        const tasks = await mockClient.getTasks();
+        assert.ok(Array.isArray(tasks), 'getTasks should return array regardless of underlying format');
+        assert.strictEqual(tasks.length, 3, 'Should return correct number of main tasks');
+        
+        // Verify progress structure supports both legacy and tagged format
+        const progress = await mockClient.getTaskProgress();
+        assert.ok(progress.mainTasks, 'Should have mainTasks property for tagged format compatibility');
+        assert.ok(progress.allItems, 'Should have allItems property for tagged format compatibility');
+        assert.strictEqual(progress.mainTasks.total, 8, 'Main tasks total should match expected count');
+        assert.strictEqual(progress.allItems.total, 8, 'All items total should match expected count');
     });
 
     test('Should display progress items with correct formatting and zero-count filtering', async () => {

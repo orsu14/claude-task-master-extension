@@ -5,6 +5,8 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { log } from './logger';
 import { Task, TaskStatus } from './types';
+import { MCPClient } from './mcpClient';
+import { TagManager } from './tagManager';
 
 const execAsync = promisify(exec);
 
@@ -12,11 +14,16 @@ export class TaskMasterClient {
     private taskmasterPath: string;
     private tasksPath: string;
     private configPath: string;
+    private mcpClient: MCPClient;
+    private tagManager: TagManager;
+    private taskMasterInstalled: boolean | null = null; // Cache installation status
 
     constructor(taskmasterPath: string) {
         this.taskmasterPath = taskmasterPath;
         this.tasksPath = path.join(taskmasterPath, 'tasks');
         this.configPath = path.join(taskmasterPath, 'config.json');
+        this.mcpClient = new MCPClient(taskmasterPath);
+        this.tagManager = new TagManager(taskmasterPath);
         log(`TaskMasterClient initialized for path: ${taskmasterPath}`);
     }
 
@@ -53,26 +60,122 @@ export class TaskMasterClient {
 
     async getTasks(): Promise<Task[]> {
         try {
-            // First try to read from tasks.json (new format)
+            // Try MCP client first if available
+            if (await this.isMCPServerAvailable()) {
+                try {
+                    const currentTag = this.tagManager.getCurrentTag();
+                    log(`Using MCP client to get tasks for tag: ${currentTag}`);
+                    return await this.mcpClient.getTasks(currentTag);
+                } catch (error) {
+                    log(`MCP getTasks failed, falling back to file reading: ${error}`);
+                }
+            }
+
+            // Fallback to reading from tasks.json (supports multiple formats)
             const tasksJsonPath = path.join(this.tasksPath, 'tasks.json');
             if (fs.existsSync(tasksJsonPath)) {
                 log(`Found tasks.json at ${tasksJsonPath}. Reading...`);
                 const tasksData = fs.readFileSync(tasksJsonPath, 'utf8');
                 const parsed = JSON.parse(tasksData);
-                const rawTasks = Array.isArray(parsed) ? parsed : parsed.tasks || [];
+                
+                let rawTasks: any[] = [];
+                
+                // Handle different task.json formats
+                if (Array.isArray(parsed)) {
+                    // Format 1: Direct array format [task1, task2, ...]
+                    rawTasks = parsed;
+                    log(`Detected direct array format with ${rawTasks.length} tasks.`);
+                } else if (parsed.master && parsed.master.tasks && Array.isArray(parsed.master.tasks)) {
+                    // Format 2: New tagged format (v0.17.0+) - Direct tag format { master: { tasks: [...] }, ... }
+                    log(`Detected new tagged format (v0.17.0+) - direct tag format.`);
+                    
+                    // Get current tag from state or default to 'master'
+                    let currentTag = 'master';
+                    try {
+                        const statePath = path.join(this.taskmasterPath, 'state.json');
+                        if (fs.existsSync(statePath)) {
+                            const stateData = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+                            currentTag = stateData.currentTag || 'master';
+                        }
+                    } catch (error) {
+                        log(`Could not read state.json, defaulting to 'master' tag: ${error}`);
+                    }
+                    
+                    // Extract tasks from the current tag
+                    const tagData = parsed[currentTag];
+                    if (tagData && tagData.tasks && Array.isArray(tagData.tasks)) {
+                        rawTasks = tagData.tasks;
+                        log(`Using tag '${currentTag}' with ${rawTasks.length} tasks.`);
+                    } else {
+                        // Fallback to master tag if current tag doesn't exist or has no tasks
+                        const masterData = parsed.master;
+                        if (masterData && masterData.tasks && Array.isArray(masterData.tasks)) {
+                            rawTasks = masterData.tasks;
+                            log(`Current tag '${currentTag}' not found or empty, falling back to 'master' tag with ${rawTasks.length} tasks.`);
+                        } else {
+                            log(`No tasks found in tag '${currentTag}' or 'master' tag.`);
+                            rawTasks = [];
+                        }
+                    }
+                } else if (parsed.tags && typeof parsed.tags === 'object') {
+                    // Format 3: New tagged format (v0.17.0+) - Nested tag format { tags: { master: { tasks: [...] }, ... } }
+                    log(`Detected new tagged format (v0.17.0+) - nested tag format.`);
+                    
+                    // Get current tag from state or default to 'master'
+                    let currentTag = 'master';
+                    try {
+                        const statePath = path.join(this.taskmasterPath, 'state.json');
+                        if (fs.existsSync(statePath)) {
+                            const stateData = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+                            currentTag = stateData.currentTag || 'master';
+                        }
+                    } catch (error) {
+                        log(`Could not read state.json, defaulting to 'master' tag: ${error}`);
+                    }
+                    
+                    // Extract tasks from the current tag
+                    const tagData = parsed.tags[currentTag];
+                    if (tagData && tagData.tasks && Array.isArray(tagData.tasks)) {
+                        rawTasks = tagData.tasks;
+                        log(`Using tag '${currentTag}' with ${rawTasks.length} tasks.`);
+                    } else {
+                        // Fallback to master tag if current tag doesn't exist or has no tasks
+                        const masterData = parsed.tags.master;
+                        if (masterData && masterData.tasks && Array.isArray(masterData.tasks)) {
+                            rawTasks = masterData.tasks;
+                            log(`Current tag '${currentTag}' not found or empty, falling back to 'master' tag with ${rawTasks.length} tasks.`);
+                        } else {
+                            log(`No tasks found in tag '${currentTag}' or 'master' tag.`);
+                            rawTasks = [];
+                        }
+                    }
+                } else if (parsed.tasks && Array.isArray(parsed.tasks)) {
+                    // Format 4: Legacy format { tasks: [...] }
+                    rawTasks = parsed.tasks;
+                    log(`Detected legacy format with ${rawTasks.length} tasks.`);
+                } else {
+                    // Unknown format
+                    log(`Unknown tasks.json format. Expected array, tagged format, or legacy format.`);
+                    rawTasks = [];
+                }
+                
                 log(`Parsed ${rawTasks.length} raw tasks from tasks.json.`);
                 
                 // Normalize status values and ensure proper structure
-                const normalizedTasks = rawTasks.map((task: any) => ({
-                    ...task,
-                    id: task.id.toString(), // Ensure ID is string
-                    status: this.normalizeStatus(task.status || 'pending'),
-                    subtasks: task.subtasks ? task.subtasks.map((subtask: any) => ({
-                        ...subtask,
-                        id: subtask.id.toString(),
-                        status: this.normalizeStatus(subtask.status || 'pending')
-                    })) : []
-                }));
+                const normalizedTasks = rawTasks
+                    .filter((task: any) => task.id !== null && task.id !== undefined) // Filter out tasks without IDs
+                    .map((task: any) => ({
+                        ...task,
+                        id: task.id.toString(), // Ensure ID is string
+                        status: this.normalizeStatus(task.status || 'pending'),
+                        subtasks: task.subtasks ? task.subtasks
+                            .filter((subtask: any) => subtask.id !== null && subtask.id !== undefined) // Filter out subtasks without IDs
+                            .map((subtask: any) => ({
+                                ...subtask,
+                                id: subtask.id.toString(),
+                                status: this.normalizeStatus(subtask.status || 'pending')
+                            })) : []
+                    }));
                 
                 // Process hierarchy for dot-notation task IDs (e.g., 1.2.3)
                 return this.processTaskHierarchy(normalizedTasks);
@@ -236,6 +339,121 @@ export class TaskMasterClient {
         return (taskId.match(/\./g) || []).length;
     }
 
+    /**
+     * Helper method to extract tasks from any format and return format info
+     * Supports legacy, direct array, and new tagged formats
+     */
+    private extractTasksFromContainer(tasksContainer: any): {
+        tasks: any[];
+        isTaggedFormat: boolean;
+        currentTag: string;
+        originalContainer: any;
+    } {
+        let tasks: any[] = [];
+        let isTaggedFormat = false;
+        let currentTag = 'master';
+        
+        if (Array.isArray(tasksContainer)) {
+            // Direct array format
+            tasks = tasksContainer;
+        } else if (tasksContainer.master && tasksContainer.master.tasks && Array.isArray(tasksContainer.master.tasks)) {
+            // New tagged format (v0.17.0+) - Direct tag format { master: { tasks: [...] }, ... }
+            isTaggedFormat = true;
+            
+            // Get current tag from state
+            try {
+                const statePath = path.join(this.taskmasterPath, 'state.json');
+                if (fs.existsSync(statePath)) {
+                    const stateData = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+                    currentTag = stateData.currentTag || 'master';
+                }
+            } catch (error) {
+                log(`Could not read state.json, using 'master' tag: ${error}`);
+            }
+            
+            // Extract tasks from current tag
+            const tagData = tasksContainer[currentTag];
+            if (tagData && tagData.tasks && Array.isArray(tagData.tasks)) {
+                tasks = tagData.tasks;
+            } else {
+                // Fallback to master tag
+                const masterData = tasksContainer.master;
+                if (masterData && masterData.tasks && Array.isArray(masterData.tasks)) {
+                    tasks = masterData.tasks;
+                    currentTag = 'master';
+                } else {
+                    throw new Error(`No tasks found in tag '${currentTag}' or 'master' tag.`);
+                }
+            }
+        } else if (tasksContainer.tags && typeof tasksContainer.tags === 'object') {
+            // New tagged format (v0.17.0+) - Nested tag format { tags: { master: { tasks: [...] }, ... } }
+            isTaggedFormat = true;
+            
+            // Get current tag from state
+            try {
+                const statePath = path.join(this.taskmasterPath, 'state.json');
+                if (fs.existsSync(statePath)) {
+                    const stateData = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+                    currentTag = stateData.currentTag || 'master';
+                }
+            } catch (error) {
+                log(`Could not read state.json, using 'master' tag: ${error}`);
+            }
+            
+            // Extract tasks from current tag
+            const tagData = tasksContainer.tags[currentTag];
+            if (tagData && tagData.tasks && Array.isArray(tagData.tasks)) {
+                tasks = tagData.tasks;
+            } else {
+                // Fallback to master tag
+                const masterData = tasksContainer.tags.master;
+                if (masterData && masterData.tasks && Array.isArray(masterData.tasks)) {
+                    tasks = masterData.tasks;
+                    currentTag = 'master';
+                } else {
+                    throw new Error(`No tasks found in tag '${currentTag}' or 'master' tag.`);
+                }
+            }
+        } else if (tasksContainer.tasks && Array.isArray(tasksContainer.tasks)) {
+            // Legacy format
+            tasks = tasksContainer.tasks;
+        } else {
+            throw new Error('Unknown tasks.json format');
+        }
+        
+        return { tasks, isTaggedFormat, currentTag, originalContainer: tasksContainer };
+    }
+
+    /**
+     * Helper method to write tasks back to the correct format
+     */
+    private writeTasksToContainer(
+        tasks: any[], 
+        isTaggedFormat: boolean, 
+        currentTag: string, 
+        originalContainer: any,
+        filePath: string
+    ): void {
+        if (isTaggedFormat) {
+            // Check if it's the direct tag format or nested tag format
+            if (originalContainer.tags && typeof originalContainer.tags === 'object') {
+                // Nested tag format { tags: { master: { tasks: [...] }, ... } }
+                originalContainer.tags[currentTag].tasks = tasks;
+            } else {
+                // Direct tag format { master: { tasks: [...] }, ... }
+                originalContainer[currentTag].tasks = tasks;
+            }
+        } else if (Array.isArray(originalContainer)) {
+            // Direct array format - replace the entire array
+            originalContainer.splice(0, originalContainer.length, ...tasks);
+        } else {
+            // Legacy format
+            originalContainer.tasks = tasks;
+        }
+        
+        fs.writeFileSync(filePath, JSON.stringify(originalContainer, null, 2), 'utf8');
+    }
+
     async getTaskDetails(taskId: string, subtaskId?: string): Promise<Task | null> {
         try {
             log(`Getting task details for mainTaskId: ${taskId}, subtaskId: ${subtaskId || 'none'}`);
@@ -362,6 +580,19 @@ export class TaskMasterClient {
     async setTaskStatus(taskId: string, status: TaskStatus): Promise<void> {
         log(`Setting status for task ${taskId} to ${status}`);
         try {
+            // Try MCP client first if available
+            if (await this.isMCPServerAvailable()) {
+                try {
+                    const currentTag = this.tagManager.getCurrentTag();
+                    log(`Using MCP client to set task status for tag: ${currentTag}`);
+                    await this.mcpClient.setTaskStatus(taskId, status, currentTag);
+                    return;
+                } catch (error) {
+                    log(`MCP setTaskStatus failed, falling back to file operations: ${error}`);
+                }
+            }
+
+            // Fallback to file operations
             const tasksJsonPath = path.join(this.tasksPath, 'tasks.json');
             if (!fs.existsSync(tasksJsonPath)) {
                 throw new Error('tasks.json not found');
@@ -369,7 +600,7 @@ export class TaskMasterClient {
 
             const tasksData = fs.readFileSync(tasksJsonPath, 'utf8');
             const tasksContainer = JSON.parse(tasksData);
-            const tasks = tasksContainer.tasks || [];
+            const { tasks, isTaggedFormat, currentTag } = this.extractTasksFromContainer(tasksContainer);
 
             let taskUpdated = false;
 
@@ -411,8 +642,7 @@ export class TaskMasterClient {
 
             if (taskUpdated) {
                 log(`Task ${taskId} found and status updated. Writing back to tasks.json.`);
-                tasksContainer.tasks = tasks;
-                fs.writeFileSync(tasksJsonPath, JSON.stringify(tasksContainer, null, 2), 'utf8');
+                this.writeTasksToContainer(tasks, isTaggedFormat, currentTag, tasksContainer, tasksJsonPath);
             } else {
                 log(`Task with ID ${taskId} not found for status update.`);
                 throw new Error(`Task with ID ${taskId} not found.`);
@@ -420,6 +650,68 @@ export class TaskMasterClient {
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             log(`Error in setTaskStatus for ${taskId}: ${errorMessage}`);
+            throw error;
+        }
+    }
+
+    /**
+     * Set the status of a specific subtask within a parent task
+     * This method ensures we update the correct subtask by requiring both parent and subtask IDs
+     */
+    async setSubtaskStatus(parentTaskId: string, subtaskId: string, status: TaskStatus): Promise<void> {
+        log(`Setting status for subtask ${subtaskId} in parent task ${parentTaskId} to ${status}`);
+        try {
+            // Try MCP client first if available
+            if (await this.isMCPServerAvailable()) {
+                try {
+                    const currentTag = this.tagManager.getCurrentTag();
+                    log(`Using MCP client to set subtask status for tag: ${currentTag}`);
+                    // For MCP, we can use the existing setTaskStatus method since MCP handles the context
+                    await this.mcpClient.setTaskStatus(subtaskId, status, currentTag);
+                    return;
+                } catch (error) {
+                    log(`MCP setSubtaskStatus failed, falling back to file operations: ${error}`);
+                }
+            }
+
+            // Fallback to file operations
+            const tasksJsonPath = path.join(this.tasksPath, 'tasks.json');
+            if (!fs.existsSync(tasksJsonPath)) {
+                throw new Error('tasks.json not found');
+            }
+
+            const tasksData = fs.readFileSync(tasksJsonPath, 'utf8');
+            const tasksContainer = JSON.parse(tasksData);
+            const { tasks, isTaggedFormat, currentTag } = this.extractTasksFromContainer(tasksContainer);
+
+            // Find the parent task
+            const parentTask = tasks.find(task => task.id.toString() === parentTaskId.toString());
+            if (!parentTask) {
+                throw new Error(`Parent task with ID ${parentTaskId} not found.`);
+            }
+
+            // Find the subtask within the parent
+            if (!parentTask.subtasks) {
+                throw new Error(`Parent task ${parentTaskId} has no subtasks.`);
+            }
+
+            const subtask = parentTask.subtasks.find((st: Task) => st.id.toString() === subtaskId.toString());
+            if (!subtask) {
+                throw new Error(`Subtask with ID ${subtaskId} not found in parent task ${parentTaskId}.`);
+            }
+
+            // Update the subtask status
+            subtask.status = this.denormalizeStatus(status) as any;
+            subtask.updated = new Date().toISOString();
+            
+            // Also update the parent task's updated timestamp
+            parentTask.updated = new Date().toISOString();
+
+            log(`Subtask ${subtaskId} in parent ${parentTaskId} found and status updated. Writing back to tasks.json.`);
+            this.writeTasksToContainer(tasks, isTaggedFormat, currentTag, tasksContainer, tasksJsonPath);
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            log(`Error in setSubtaskStatus for subtask ${subtaskId} in parent ${parentTaskId}: ${errorMessage}`);
             throw error;
         }
     }
@@ -695,7 +987,7 @@ export class TaskMasterClient {
 
                 const tasksData = fs.readFileSync(tasksJsonPath, 'utf8');
             const tasksContainer = JSON.parse(tasksData);
-            const tasks = tasksContainer.tasks || [];
+            const { tasks, isTaggedFormat, currentTag } = this.extractTasksFromContainer(tasksContainer);
 
             // Find parent task recursively
             const findParent = (items: Task[]): Task | undefined => {
@@ -720,8 +1012,8 @@ export class TaskMasterClient {
                     parentTask.subtasks = [];
                 }
                 
-                // Generate new subtask ID
-                const newSubtaskId = `${parentTask.id}.${parentTask.subtasks.length + 1}`;
+                // Generate new subtask ID (simple integer, not dotted notation)
+                const newSubtaskId = (parentTask.subtasks.length + 1).toString();
                 const newSubtask: Task = {
                     id: newSubtaskId,
                     ...subtask,
@@ -733,8 +1025,7 @@ export class TaskMasterClient {
                 parentTask.subtasks.push(newSubtask);
                 log(`Added subtask ${newSubtaskId} to parent ${parentTaskId}.`);
 
-                tasksContainer.tasks = tasks;
-                fs.writeFileSync(tasksJsonPath, JSON.stringify(tasksContainer, null, 2), 'utf8');
+                this.writeTasksToContainer(tasks, isTaggedFormat, currentTag, tasksContainer, tasksJsonPath);
             } else {
                 throw new Error(`Parent task with ID ${parentTaskId} not found.`);
             }
@@ -762,7 +1053,7 @@ export class TaskMasterClient {
             if (fs.existsSync(tasksJsonPath)) {
                 const tasksData = fs.readFileSync(tasksJsonPath, 'utf8');
                 const parsed = JSON.parse(tasksData);
-                const tasks = Array.isArray(parsed) ? parsed : parsed.tasks || [];
+                const { tasks, isTaggedFormat, currentTag } = this.extractTasksFromContainer(parsed);
                 
                 const parentIndex = tasks.findIndex((task: any) => 
                     task.id.toString() === parentTaskId.toString()
@@ -790,8 +1081,7 @@ export class TaskMasterClient {
                             parent.subtasks[subtaskIndex] = updatedSubtask;
                             parent.updated = new Date().toISOString();
                             
-                            const updatedData = Array.isArray(parsed) ? tasks : { ...parsed, tasks };
-                            fs.writeFileSync(tasksJsonPath, JSON.stringify(updatedData, null, 2));
+                            this.writeTasksToContainer(tasks, isTaggedFormat, currentTag, parsed, tasksJsonPath);
                             return;
                         }
                     }
@@ -854,31 +1144,42 @@ export class TaskMasterClient {
                 throw new Error('tasks.json not found');
             }
 
-                const tasksData = fs.readFileSync(tasksJsonPath, 'utf8');
-            // Parse tasks data (currently only used for validation)
-            JSON.parse(tasksData);
-                
-            const parentTask = await this.getTaskDetails(parentTaskId);
+            const tasksData = fs.readFileSync(tasksJsonPath, 'utf8');
+            const tasksContainer = JSON.parse(tasksData);
+            const { tasks, isTaggedFormat, currentTag } = this.extractTasksFromContainer(tasksContainer);
+
+            // Find parent task recursively
+            const findParent = (items: Task[]): Task | undefined => {
+                for (const item of items) {
+                    if (item.id.toString() === parentTaskId.toString()) {
+                        return item;
+                    }
+                    if (item.subtasks) {
+                        const found = findParent(item.subtasks);
+                        if (found) {
+                            return found;
+                        }
+                    }
+                }
+                return undefined;
+            };
+
+            const parentTask = findParent(tasks);
                 
             if (parentTask && parentTask.subtasks) {
                 const initialLength = parentTask.subtasks.length;
-                parentTask.subtasks = parentTask.subtasks.filter(st => st.id !== subtaskId);
+                parentTask.subtasks = parentTask.subtasks.filter(st => 
+                    st.id.toString() !== subtaskId.toString() && 
+                    st.id.toString() !== `${parentTaskId}.${subtaskId}`
+                );
                         
                 if (parentTask.subtasks.length < initialLength) {
                     log(`Subtask ${subtaskId} removed. Writing updates.`);
-                    // This only updates the local object. Need to write back to file.
-                    // This method needs full file read/write like addSubtask
-                    const tasks = await this.getTasks();
-                    const taskToUpdate = tasks.find(t => t.id.toString() === parentTaskId.toString());
-                    if (taskToUpdate) {
-                        taskToUpdate.subtasks = parentTask.subtasks;
-                        const tasksContainer = { tasks: tasks };
-                        fs.writeFileSync(tasksJsonPath, JSON.stringify(tasksContainer, null, 2), 'utf8');
-                    } else {
-                        throw new Error('Failed to find parent task to update in file.');
-                    }
+                    parentTask.updated = new Date().toISOString();
+                    this.writeTasksToContainer(tasks, isTaggedFormat, currentTag, tasksContainer, tasksJsonPath);
                 } else {
                     log(`Subtask ${subtaskId} not found under parent ${parentTaskId}.`);
+                    throw new Error(`Subtask ${subtaskId} not found under parent ${parentTaskId}.`);
                 }
             } else {
                 throw new Error(`Parent task ${parentTaskId} not found or has no subtasks.`);
@@ -896,12 +1197,34 @@ export class TaskMasterClient {
      */
     async isMCPServerAvailable(): Promise<boolean> {
         try {
-            // Try to call a simple MCP function to test availability
-            // This would be implemented based on your MCP client setup
-            // For now, we'll assume MCP is available if hasTaskmaster returns true
-            return this.hasTaskmaster();
+            return await this.mcpClient.isAvailable();
         } catch (error) {
             log(`MCP server check failed: ${error}`);
+            return false;
+        }
+    }
+
+    /**
+     * Check if task-master command is available (with caching)
+     */
+    private async isTaskMasterInstalled(): Promise<boolean> {
+        // Return cached result if available
+        if (this.taskMasterInstalled !== null) {
+            return this.taskMasterInstalled;
+        }
+
+        try {
+            // Try to run task-master --version to check if it's installed
+            await execAsync('task-master --version', {
+                cwd: this.taskmasterPath,
+                timeout: 5000 // 5 second timeout for version check
+            });
+            this.taskMasterInstalled = true;
+            log(`task-master command is available`);
+            return true;
+        } catch (error) {
+            this.taskMasterInstalled = false;
+            log(`task-master command not available: ${error}`);
             return false;
         }
     }
@@ -911,19 +1234,40 @@ export class TaskMasterClient {
      */
     private async executeTaskMasterCLI(command: string, args: string[] = []): Promise<string> {
         try {
-            const fullCommand = `npx task-master-ai ${command} ${args.join(' ')}`;
-            log(`Executing CLI fallback: ${fullCommand}`);
+            // Check if task-master is installed first
+            const isInstalled = await this.isTaskMasterInstalled();
             
-            const { stdout, stderr } = await execAsync(fullCommand, {
-                cwd: this.taskmasterPath,
-                timeout: 30000 // 30 second timeout
-            });
-            
-            if (stderr && !stderr.includes('npm WARN')) {
-                log(`CLI command stderr: ${stderr}`);
+            if (isInstalled) {
+                // Use direct task-master command
+                const fullCommand = `task-master ${command} ${args.join(' ')}`;
+                log(`Executing CLI with direct command: ${fullCommand}`);
+                
+                const { stdout, stderr } = await execAsync(fullCommand, {
+                    cwd: this.taskmasterPath,
+                    timeout: 30000 // 30 second timeout
+                });
+                
+                if (stderr && !stderr.includes('npm WARN')) {
+                    log(`CLI command stderr: ${stderr}`);
+                }
+                
+                return stdout;
+            } else {
+                // Fall back to npx
+                const fullCommand = `npx task-master-ai ${command} ${args.join(' ')}`;
+                log(`task-master not installed, using npx fallback: ${fullCommand}`);
+                
+                const { stdout, stderr } = await execAsync(fullCommand, {
+                    cwd: this.taskmasterPath,
+                    timeout: 30000 // 30 second timeout
+                });
+                
+                if (stderr && !stderr.includes('npm WARN')) {
+                    log(`CLI command stderr: ${stderr}`);
+                }
+                
+                return stdout;
             }
-            
-            return stdout;
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             log(`CLI command failed: ${errorMessage}`);
@@ -934,13 +1278,16 @@ export class TaskMasterClient {
     /**
      * Add a new task with CLI fallback
      */
-    async addTask(task: Omit<Task, 'id'>, useCLI: boolean = false): Promise<void> {
+    async addTask(task: Omit<Task, 'id'>, useCLI: boolean = false, tagContext?: string): Promise<void> {
+        // Use provided tag context or fall back to current tag
+        const targetTag = tagContext || this.tagManager.getCurrentTag();
+        
         if (!useCLI && await this.isMCPServerAvailable()) {
             // Try MCP first
             try {
-                // MCP implementation would go here
-                // For now, fall back to CLI
-                useCLI = true;
+                await this.mcpClient.addTask(task, targetTag);
+                log(`Task added via MCP: ${task.title} (tag: ${targetTag})`);
+                return;
             } catch (error) {
                 log(`MCP addTask failed, falling back to CLI: ${error}`);
                 useCLI = true;
@@ -956,9 +1303,14 @@ export class TaskMasterClient {
             if (task.dependencies && task.dependencies.length > 0) {
                 args.push('--dependencies', task.dependencies.join(','));
             }
+            
+            // Add tag parameter if not master tag
+            if (targetTag !== 'master') {
+                args.push('--tag', targetTag);
+            }
 
             await this.executeTaskMasterCLI('add-task', args);
-            log(`Task added via CLI: ${task.title}`);
+            log(`Task added via CLI: ${task.title} (tag: ${targetTag})`);
         }
     }
 
@@ -969,6 +1321,7 @@ export class TaskMasterClient {
         const useCLI = !(await this.isMCPServerAvailable());
         
         if (useCLI) {
+            const currentTag = this.tagManager.getCurrentTag();
             const args = [
                 '--parent', parentTaskId.toString(),
                 '--title', `"${subtask.title}"`,
@@ -982,9 +1335,14 @@ export class TaskMasterClient {
             if (subtask.priority) {
                 args.push('--priority', subtask.priority);
             }
+            
+            // Add tag parameter if not master tag
+            if (currentTag !== 'master') {
+                args.push('--tag', currentTag);
+            }
 
             await this.executeTaskMasterCLI('add-subtask', args);
-            log(`Subtask added via CLI: ${subtask.title} to parent ${parentTaskId}`);
+            log(`Subtask added via CLI: ${subtask.title} to parent ${parentTaskId} (tag: ${currentTag})`);
         } else {
             // Fall back to existing method if MCP is available
             await this.addSubtask(parentTaskId, subtask);
@@ -994,7 +1352,9 @@ export class TaskMasterClient {
     /**
      * Set task status with CLI fallback
      */
-    async setTaskStatusWithCLI(taskId: string, status: TaskStatus): Promise<void> {
+    async setTaskStatusWithCLI(taskId: string, status: TaskStatus, tagContext?: string): Promise<void> {
+        // Use provided tag context or fall back to current tag
+        const targetTag = tagContext || this.tagManager.getCurrentTag();
         const useCLI = !(await this.isMCPServerAvailable());
         
         if (useCLI) {
@@ -1002,9 +1362,14 @@ export class TaskMasterClient {
                 '--id', taskId.toString(),
                 '--status', this.denormalizeStatus(status)
             ];
+            
+            // Add tag parameter if not master tag
+            if (targetTag !== 'master') {
+                args.push('--tag', targetTag);
+            }
 
             await this.executeTaskMasterCLI('set-status', args);
-            log(`Task status updated via CLI: ${taskId} -> ${status}`);
+            log(`Task status updated via CLI: ${taskId} -> ${status} (tag: ${targetTag})`);
         } else {
             // Fall back to existing method if MCP is available
             await this.setTaskStatus(taskId, status);
@@ -1014,7 +1379,9 @@ export class TaskMasterClient {
     /**
      * Expand task with CLI fallback
      */
-    async expandTaskWithCLI(taskId: string, force: boolean = false): Promise<void> {
+    async expandTaskWithCLI(taskId: string, force: boolean = false, tagContext?: string): Promise<void> {
+        // Use provided tag context or fall back to current tag
+        const targetTag = tagContext || this.tagManager.getCurrentTag();
         const useCLI = !(await this.isMCPServerAvailable());
         
         if (useCLI) {
@@ -1025,11 +1392,22 @@ export class TaskMasterClient {
             if (force) {
                 args.push('--force');
             }
+            
+            // Add tag parameter if not master tag
+            if (targetTag !== 'master') {
+                args.push('--tag', targetTag);
+            }
 
             await this.executeTaskMasterCLI('expand', args);
-            log(`Task expanded via CLI: ${taskId}`);
+            log(`Task expanded via CLI: ${taskId} (tag: ${targetTag})`);
         } else {
-            throw new Error('MCP server expand functionality not implemented yet');
+            // Try MCP expand functionality
+            try {
+                await this.mcpClient.expandTask(taskId, force, targetTag);
+                log(`Task expanded via MCP: ${taskId} (tag: ${targetTag})`);
+            } catch (error) {
+                throw new Error(`MCP server expand functionality failed: ${error}`);
+            }
         }
     }
 
@@ -1111,5 +1489,98 @@ export class TaskMasterClient {
                 vscode.env.openExternal(vscode.Uri.parse('https://github.com/task-master-ai/task-master-ai#mcp-setup'));
             }
         });
+    }
+
+    /**
+     * Get tag manager instance
+     */
+    getTagManager(): TagManager {
+        return this.tagManager;
+    }
+
+    /**
+     * Get current tag information
+     */
+    getCurrentTag(): string {
+        return this.tagManager.getCurrentTag();
+    }
+
+    /**
+     * Get available tags
+     */
+    getAvailableTags(): string[] {
+        return this.tagManager.getAvailableTags();
+    }
+
+    /**
+     * Get tag context information
+     */
+    getTagContext(): { currentTag: string; availableTags: string[]; isTaggedFormat: boolean } {
+        return this.tagManager.getTagContext();
+    }
+
+    /**
+     * Switch to a different tag
+     */
+    async switchTag(tagName: string): Promise<void> {
+        try {
+            // Try MCP client first if available
+            if (await this.isMCPServerAvailable()) {
+                await this.mcpClient.switchTag(tagName);
+            }
+            
+            // Update local tag manager
+            this.tagManager.setCurrentTag(tagName);
+            log(`Switched to tag: ${tagName}`);
+        } catch (error) {
+            log(`Error switching to tag ${tagName}: ${error}`);
+            throw error;
+        }
+    }
+
+    /**
+     * Create a new tag
+     */
+    async createTag(tagName: string): Promise<void> {
+        try {
+            // Use CLI approach for tag creation with proper command
+            await this.executeTaskMasterCLI('add-tag', [tagName]);
+            
+            log(`Created tag: ${tagName}`);
+        } catch (error) {
+            log(`Error creating tag ${tagName}: ${error}`);
+            throw error;
+        }
+    }
+
+    /**
+     * Delete a tag
+     */
+    async deleteTag(tagName: string): Promise<void> {
+        try {
+            if (tagName === 'master') {
+                throw new Error('Cannot delete the master tag');
+            }
+            
+            // Use CLI approach for tag deletion with proper command
+            await this.executeTaskMasterCLI('delete-tag', [tagName, '--yes']);
+            
+            // If we deleted the current tag, switch to master
+            if (this.tagManager.getCurrentTag() === tagName) {
+                this.tagManager.setCurrentTag('master');
+            }
+            
+            log(`Deleted tag: ${tagName}`);
+        } catch (error) {
+            log(`Error deleting tag ${tagName}: ${error}`);
+            throw error;
+        }
+    }
+
+    /**
+     * Check if the current format is tagged
+     */
+    isTaggedFormat(): boolean {
+        return this.tagManager.isTaggedFormat();
     }
 } 

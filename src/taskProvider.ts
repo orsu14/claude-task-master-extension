@@ -10,7 +10,8 @@ export class TaskItem extends vscode.TreeItem {
         public readonly task?: Task,
         public readonly type?: 'category' | 'task' | 'subtask' | 'progress' | 'next-task',
         public readonly nestingLevel: number = 0,
-        public readonly parentTaskId?: string  // Add parent task ID for subtasks
+        public readonly parentTaskId?: string,  // Add parent task ID for subtasks
+        public readonly tagContext?: { currentTag: string; isTaggedFormat: boolean; availableTags: string[] }  // Add tag context
     ) {
         super(label, collapsibleState);
         
@@ -75,6 +76,14 @@ export class TaskItem extends vscode.TreeItem {
     private generateTooltip(task: Task): string {
         let tooltip = `${task.title}\n\nStatus: ${task.status}`;
         
+        // Add tag information if available
+        if (this.tagContext?.isTaggedFormat) {
+            tooltip += `\nTag: ${this.tagContext.currentTag}`;
+            if (this.tagContext.availableTags.length > 1) {
+                tooltip += ` (${this.tagContext.availableTags.length} tags available)`;
+            }
+        }
+        
         if (task.priority) {
             tooltip += `\nPriority: ${task.priority}`;
         }
@@ -105,6 +114,11 @@ export class TaskItem extends vscode.TreeItem {
 
     private generateDescription(task: Task): string {
         const parts: string[] = [];
+        
+        // Tag indicator for tagged format (only show if multiple tags available)
+        if (this.tagContext?.isTaggedFormat && this.tagContext.availableTags.length > 1) {
+            parts.push(`🏷️[${this.tagContext.currentTag}]`);
+        }
         
         // Priority indicator with emoji
         if (task.priority) {
@@ -178,17 +192,28 @@ export class TaskItem extends vscode.TreeItem {
         // Check if task has subtasks to use different icons
         const hasSubtasks = task.subtasks && task.subtasks.length > 0;
         
+        // For tagged format with multiple tags, add subtle visual distinction
+        const isMultiTaggedFormat = this.tagContext?.isTaggedFormat && this.tagContext.availableTags.length > 1;
+        
         switch (task.status) {
             case 'completed':
             case 'done':
                 if (hasSubtasks) {
                     return new vscode.ThemeIcon('checklist', new vscode.ThemeColor('charts.green'));
                 }
+                // Use different icon for tagged tasks to provide visual distinction
+                if (isMultiTaggedFormat) {
+                    return new vscode.ThemeIcon('verified-filled', new vscode.ThemeColor('charts.green'));
+                }
                 return new vscode.ThemeIcon('check-all', new vscode.ThemeColor('charts.green'));
                 
             case 'in-progress':
                 if (hasSubtasks) {
                     return new vscode.ThemeIcon('sync~spin', new vscode.ThemeColor('charts.blue'));
+                }
+                // Use different icon for tagged tasks to provide visual distinction
+                if (isMultiTaggedFormat) {
+                    return new vscode.ThemeIcon('play-circle', new vscode.ThemeColor('charts.blue'));
                 }
                 return new vscode.ThemeIcon('play', new vscode.ThemeColor('charts.blue'));
                 
@@ -222,15 +247,138 @@ export class TaskProvider implements vscode.TreeDataProvider<TaskItem> {
     // Track expanded items by their unique key
     private expandedItems: Set<string> = new Set();
     private allExpanded: boolean = false;
+    
+    // Tag context support
+    private currentTag: string = 'master';
+    private availableTags: string[] = ['master'];
+    private isTaggedFormat: boolean = false;
+    
+    // Debouncing for frequent refresh calls
+    private refreshTimeout: NodeJS.Timeout | null = null;
+    private readonly REFRESH_DEBOUNCE_MS = 300; // 300ms debounce
 
     constructor(private taskMasterClient: TaskMasterClient) {
         log('TaskProvider constructed.');
+        this.initializeTagContext();
+    }
+
+    /**
+     * Initialize tag context from TaskMasterClient
+     */
+    private initializeTagContext(): void {
+        try {
+            const tagContext = this.taskMasterClient.getTagContext();
+            this.currentTag = tagContext.currentTag;
+            this.availableTags = tagContext.availableTags;
+            this.isTaggedFormat = tagContext.isTaggedFormat;
+            log(`TaskProvider initialized with tag context: currentTag=${this.currentTag}, availableTags=[${this.availableTags.join(', ')}], isTaggedFormat=${this.isTaggedFormat}`);
+        } catch (error) {
+            log(`Failed to initialize tag context, using defaults: ${error}`);
+            this.currentTag = 'master';
+            this.availableTags = ['master'];
+            this.isTaggedFormat = false;
+        }
+    }
+
+    /**
+     * Get current tag context
+     */
+    getTagContext(): { currentTag: string; availableTags: string[]; isTaggedFormat: boolean } {
+        return {
+            currentTag: this.currentTag,
+            availableTags: this.availableTags,
+            isTaggedFormat: this.isTaggedFormat
+        };
+    }
+
+    /**
+     * Switch to a different tag context
+     */
+    async switchTag(tagName: string): Promise<void> {
+        try {
+            log(`TaskProvider switching from tag '${this.currentTag}' to '${tagName}'`);
+            
+            // Update tag context via TaskMasterClient
+            await this.taskMasterClient.switchTag(tagName);
+            
+            // Update local tag context
+            this.currentTag = tagName;
+            
+            // Refresh tag context from client to ensure consistency
+            const tagContext = this.taskMasterClient.getTagContext();
+            this.availableTags = tagContext.availableTags;
+            this.isTaggedFormat = tagContext.isTaggedFormat;
+            
+            log(`TaskProvider successfully switched to tag '${tagName}'`);
+            
+            // Use immediate refresh for tag switching to provide instant feedback
+            this.refreshImmediate();
+        } catch (error) {
+            log(`Failed to switch to tag '${tagName}': ${error}`);
+            throw error;
+        }
+    }
+
+    /**
+     * Refresh tag context and tree view
+     */
+    refreshTagContext(): void {
+        log('TaskProvider refreshing tag context');
+        this.initializeTagContext();
+        this.refresh();
     }
 
     refresh(): void {
         log('TaskProvider.refresh called.');
+        this.debouncedRefresh();
+    }
+
+    /**
+     * Debounced refresh to prevent excessive tree updates during frequent tag changes
+     */
+    private debouncedRefresh(): void {
+        // Clear existing timeout
+        if (this.refreshTimeout) {
+            clearTimeout(this.refreshTimeout);
+        }
+
+        // Set new timeout
+        this.refreshTimeout = setTimeout(() => {
+            this.performRefresh();
+            this.refreshTimeout = null;
+        }, this.REFRESH_DEBOUNCE_MS);
+    }
+
+    /**
+     * Immediate refresh without debouncing (for critical updates)
+     */
+    refreshImmediate(): void {
+        log('TaskProvider.refreshImmediate called.');
+        // Clear any pending debounced refresh
+        if (this.refreshTimeout) {
+            clearTimeout(this.refreshTimeout);
+            this.refreshTimeout = null;
+        }
+        this.performRefresh();
+    }
+
+    /**
+     * Perform the actual refresh operation
+     */
+    private performRefresh(): void {
         const timestamp = new Date().toISOString();
-        log(`🔄 TREE REFRESH [${timestamp}] - Tree data provider refreshed`);
+        log(`🔄 TREE REFRESH [${timestamp}] - Tree data provider refreshed for tag: ${this.currentTag}`);
+        
+        // Update tag context before refreshing to ensure we have the latest information
+        try {
+            const tagContext = this.taskMasterClient.getTagContext();
+            this.currentTag = tagContext.currentTag;
+            this.availableTags = tagContext.availableTags;
+            this.isTaggedFormat = tagContext.isTaggedFormat;
+        } catch (error) {
+            log(`Warning: Could not update tag context during refresh: ${error}`);
+        }
+        
         this._onDidChangeTreeData.fire();
     }
 
@@ -373,7 +521,8 @@ export class TaskProvider implements vscode.TreeDataProvider<TaskItem> {
                     subtask,
                     'subtask', // Use specific type for subtasks
                     nestingLevel,
-                    element.task?.id.toString() // Pass parent task ID for subtasks
+                    element.task?.id.toString(), // Pass parent task ID for subtasks
+                    this.getTagContext() // Pass tag context for tag-aware display
                 );
                 
                 // Add status and progress info as description for clear visibility
@@ -412,15 +561,89 @@ export class TaskProvider implements vscode.TreeDataProvider<TaskItem> {
             const tasks = await this.getTasks();
             log(`getRootItems: Loaded ${tasks.length} tasks.`);
             
-            if (tasks.length === 0) {
-                log('getRootItems: No tasks found, showing empty message.');
-                const emptyItem = new TaskItem(
-                    'No tasks found',
+            // Add tag context indicator if using tagged format
+            if (this.isTaggedFormat && this.availableTags.length > 1) {
+                log(`getRootItems: Adding tag context indicator for tag '${this.currentTag}'`);
+                const tagItem = new TaskItem(
+                    `🏷️ Tag: ${this.currentTag}`,
                     vscode.TreeItemCollapsibleState.None
                 );
-                emptyItem.description = 'Create tasks to get started';
+                tagItem.description = `${this.availableTags.length} tags available • Click to switch`;
+                tagItem.iconPath = new vscode.ThemeIcon('tag', new vscode.ThemeColor('charts.purple'));
+                tagItem.command = {
+                    command: 'claudeTaskMaster.switchTag',
+                    title: 'Switch Tag',
+                    arguments: []
+                };
+                items.push(tagItem);
+            }
+            
+            if (tasks.length === 0) {
+                log('getRootItems: No tasks found, showing empty state with quick actions.');
+                
+                // Main empty message
+                const emptyMessage = this.isTaggedFormat ? 
+                    `No tasks found in tag '${this.currentTag}'` : 
+                    'No tasks found';
+                const emptyDescription = this.isTaggedFormat ? 
+                    'Switch tags or create tasks to get started' : 
+                    'Create tasks to get started';
+                    
+                const emptyItem = new TaskItem(
+                    emptyMessage,
+                    vscode.TreeItemCollapsibleState.None
+                );
+                emptyItem.description = emptyDescription;
                 emptyItem.iconPath = new vscode.ThemeIcon('info');
-                return [emptyItem];
+                items.push(emptyItem);
+
+                // Quick action: Add Task
+                const addTaskItem = new TaskItem(
+                    '➕ Add New Task',
+                    vscode.TreeItemCollapsibleState.None
+                );
+                addTaskItem.description = 'Create your first task';
+                addTaskItem.iconPath = new vscode.ThemeIcon('add', new vscode.ThemeColor('charts.green'));
+                addTaskItem.command = {
+                    command: 'claudeTaskMaster.addTask',
+                    title: 'Add Task',
+                    arguments: []
+                };
+                items.push(addTaskItem);
+
+                // Quick action: Switch Tag (only for tagged format with multiple tags)
+                if (this.isTaggedFormat && this.availableTags.length > 1) {
+                    const switchTagItem = new TaskItem(
+                        '🏷️ Switch to Different Tag',
+                        vscode.TreeItemCollapsibleState.None
+                    );
+                    switchTagItem.description = `${this.availableTags.length - 1} other tags available`;
+                    switchTagItem.iconPath = new vscode.ThemeIcon('tag', new vscode.ThemeColor('charts.purple'));
+                    switchTagItem.command = {
+                        command: 'claudeTaskMaster.switchTag',
+                        title: 'Switch Tag',
+                        arguments: []
+                    };
+                    items.push(switchTagItem);
+                }
+
+                // Quick action: Create Tag (only for tagged format)
+                if (this.isTaggedFormat) {
+                    const createTagItem = new TaskItem(
+                        '🆕 Create New Tag',
+                        vscode.TreeItemCollapsibleState.None
+                    );
+                    createTagItem.description = 'Create a new tag context';
+                    createTagItem.iconPath = new vscode.ThemeIcon('plus', new vscode.ThemeColor('charts.blue'));
+                    createTagItem.command = {
+                        command: 'claudeTaskMaster.createTag',
+                        title: 'Create Tag',
+                        arguments: []
+                    };
+                    items.push(createTagItem);
+                }
+
+                return items;
             }
 
             // Current task (in-progress tasks)
@@ -630,7 +853,8 @@ export class TaskProvider implements vscode.TreeDataProvider<TaskItem> {
                     nextTask,
                     isSubtask ? 'subtask' : 'task',
                     0, // Nesting level for next task display
-                    parentTaskId // Pass parent task ID if this is a subtask
+                    parentTaskId, // Pass parent task ID if this is a subtask
+                    this.getTagContext() // Pass tag context for tag-aware display
                 );
                 nextTaskItem.iconPath = new vscode.ThemeIcon('arrow-right', new vscode.ThemeColor('charts.orange'));
                 
@@ -703,7 +927,9 @@ export class TaskProvider implements vscode.TreeDataProvider<TaskItem> {
                     collapsibleState,
                     task,
                     'task',
-                    0 // Main tasks always at root level in category
+                    0, // Main tasks always at root level in category
+                    undefined, // No parent task ID for main tasks
+                    this.getTagContext() // Pass tag context for tag-aware display
                 );
                 
                 // Set context value so getChildren knows this is from completed section
@@ -807,7 +1033,8 @@ export class TaskProvider implements vscode.TreeDataProvider<TaskItem> {
                 task,
                 isSubtask ? 'subtask' : 'task',
                 nestingLevel,
-                parentTaskId // Pass parent task ID if this is a subtask
+                parentTaskId, // Pass parent task ID if this is a subtask
+                this.getTagContext() // Pass tag context for tag-aware display
             );
         });
     }

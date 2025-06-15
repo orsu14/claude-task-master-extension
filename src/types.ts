@@ -61,6 +61,7 @@ export interface TaskFormData {
     dueDate?: string;
     assignee?: string;
     tags?: string[];
+    tagContext?: string; // The tag context to create the task in (e.g., 'master', 'feature-branch')
 }
 
 export interface SubtaskFormData {
@@ -183,4 +184,112 @@ export interface RawTask {
     details?: string;
     testStrategy?: string;
     [key: string]: unknown; // Allow additional properties in raw data
+} 
+
+// Tag-related types for v0.17.0 multi-context functionality
+export interface Tag {
+    id: string;
+    name: string;
+    description?: string | undefined;
+    creationDate: Date;
+    isMaster: boolean;
+    taskCount: number;
+    color?: string | undefined;
+    metadata?: TagMetadata | undefined;
+}
+
+export interface TagMetadata {
+    lastModified?: Date;
+    totalTasks?: number;
+    completedTasks?: number;
+    pendingTasks?: number;
+    [key: string]: unknown;
+}
+
+export interface TaggedTasksFormat {
+    [tagName: string]: {
+        metadata?: TagMetadata;
+        tasks: Task[];
+    };
+}
+
+export interface TagStorage {
+    tags: Tag[];
+    activeTagId: string;
+    version: string;
+}
+
+export interface TagValidationResult {
+    isValid: boolean;
+    errors: string[];
+    warnings: string[];
+}
+
+export interface TagOperationResult {
+    success: boolean;
+    tagId?: string;
+    action?: string;
+    message?: string;
+    error?: string;
+}
+
+// Legacy format detection types
+export interface FormatDetectionResult {
+    isLegacyFormat: boolean;
+    version?: string;
+    taskCount: number;
+    needsMigration: boolean;
+    complexity: 'low' | 'medium' | 'high';
+}
+
+export interface MigrationProgress {
+    stage: string;
+    percentage: number;
+    currentOperation: string;
+    estimatedTimeRemaining?: number;
+    tasksProcessed: number;
+    totalTasks: number;
+}
+
+export interface MigrationResult {
+    success: boolean;
+    backupPath?: string;
+    migratedTasks: number;
+    errors: string[];
+    warnings: string[];
+    rollbackAvailable: boolean;
+}
+
+// Extension-specific tag interfaces for UI and command operations
+export interface TagContextInfo {
+    currentTag: string;
+    availableTags: string[];
+    isTaggedFormat: boolean;
+}
+
+export interface TagSelectionOptions {
+    label: string;
+    detail: string;
+    picked?: boolean;
+    tagName: string;
+}
+
+export interface TagUIOptions {
+    showCurrentTag?: boolean;
+    allowMultipleSelection?: boolean;
+    placeholder?: string;
+    title?: string;
+}
+
+export interface ExtensionTagValidationResult {
+    isValid: boolean;
+    error?: string;
+    warning?: string;
+}
+
+export interface TagAwareCommandOptions {
+    taskId?: string;
+    tagContext?: string;
+    preserveCurrentTag?: boolean;
+    showTagInUI?: boolean;
 } 

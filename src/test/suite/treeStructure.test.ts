@@ -8,6 +8,16 @@ class MockTreeTaskMasterClient extends TaskMasterClient {
     private mockTasks: any[] = [];
 
     constructor() {
+        // Mock file system operations before calling super
+        const fs = require('fs');
+        const sinon = require('sinon');
+        try {
+            sinon.stub(fs, 'writeFileSync').returns(undefined);
+            sinon.stub(fs, 'mkdirSync').returns(undefined);
+            sinon.stub(fs, 'existsSync').returns(false);
+        } catch (e) {
+            // Already stubbed, ignore
+        }
         super('/mock/path');
     }
 
@@ -338,5 +348,44 @@ suite('Tree Structure Test Suite', () => {
         // Only collapseAll should change state
         taskProvider.collapseAll();
         assert.strictEqual((taskProvider as any).isExpanded(itemKey), false);
+    });
+
+    test('Should handle tagged format data structure correctly', async () => {
+        // Test that tree structure works with tagged format data
+        const mockTasks = [
+            {
+                id: '1',
+                title: 'Tagged Format Task',
+                status: 'todo' as const,
+                subtasks: [
+                    { id: '1.1', title: 'Tagged Subtask', status: 'completed' as const, dependencies: [] }
+                ]
+            }
+        ];
+
+        mockClient.setMockTasks(mockTasks);
+
+        // Verify that getTasks returns proper array format regardless of underlying structure
+        const tasks = await mockClient.getTasks();
+        assert.ok(Array.isArray(tasks), 'getTasks should return array for tree structure compatibility');
+        assert.strictEqual(tasks.length, 1, 'Should return correct number of tasks');
+        assert.strictEqual(tasks[0].id, '1', 'Should preserve task structure');
+
+        // Verify that progress calculation works with tagged format
+        const progress = await mockClient.getTaskProgress();
+        assert.ok(progress.mainTasks, 'Should have mainTasks property for tagged format');
+        assert.ok(progress.allItems, 'Should have allItems property for tagged format');
+        assert.strictEqual(typeof progress.mainTasks.total, 'number', 'Main tasks total should be numeric');
+        assert.strictEqual(typeof progress.allItems.total, 'number', 'All items total should be numeric');
+
+        // Verify tree structure can be built from tagged format data
+        const rootItems = await (taskProvider as any).getRootItems();
+        assert.ok(rootItems.length > 0, 'Should generate tree structure from tagged format data');
+        
+        // Find a category that should contain our test task
+        const todoCategory = rootItems.find((item: TaskItem) => 
+            item.label?.toLowerCase().includes('todo')
+        );
+        assert.ok(todoCategory, 'Should create status categories from tagged format data');
     });
 }); 

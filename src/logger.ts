@@ -40,23 +40,23 @@ export function initializeLogger() {
 
     // Only initialize file logging if explicitly enabled
     if (isFileLoggingEnabled()) {
-        const logFilePath = getLogFilePath();
-        if (!logFilePath) {
+    const logFilePath = getLogFilePath();
+    if (!logFilePath) {
             console.log('[TaskMaster] Could not initialize file logger, no workspace folder found.');
-            return;
-        }
-        
-        // Clear old log file on activation
-        if (fs.existsSync(logFilePath)) {
-            fs.unlinkSync(logFilePath);
-        }
-        logStream = fs.createWriteStream(logFilePath, { flags: 'a' });
+        return;
+    }
+    
+    // Clear old log file on activation
+    if (fs.existsSync(logFilePath)) {
+        fs.unlinkSync(logFilePath);
+    }
+    logStream = fs.createWriteStream(logFilePath, { flags: 'a' });
         log('File logger initialized.');
     }
 }
 
 export function log(message: string) {
-    const timestamp = new Date().toISOString();
+        const timestamp = new Date().toISOString();
     const formattedMessage = `[${timestamp}] ${message}`;
     
     // Always log to console in development mode or when logging is enabled

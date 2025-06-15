@@ -236,4 +236,14 @@ Desktop.ini
 
 # Keep TypeScript config
 !tsconfig.json
-!tsconfig.*.json 
+!tsconfig.*.json
+
+# Added by Claude Task Master
+logs
+# Dependency directories
+# Environment variables
+# Editor directories and files
+.idea
+.vscode
+# OS specific
+# Task files
